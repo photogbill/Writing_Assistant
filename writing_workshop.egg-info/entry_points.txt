@@ -1,0 +1,2 @@
+[console_scripts]
+workshop = writing_workshop.cli:main

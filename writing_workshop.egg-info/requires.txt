@@ -1,0 +1,10 @@
+
+[all]
+writing-workshop[dev,docx]
+
+[dev]
+pytest>=8
+ruff>=0.6
+
+[docx]
+python-docx>=1.1
