@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """ATK's Writing Workshop pages. Destination: `atk/ui/writing_panel.py`.
 
+**REFERENCE COPY, NOT THE SHIPPED ADAPTER — read this before fixing
+anything here.** ATK carries its own
+`atk/ui/writing_panel.py`, it does not import `adapters/` at all, and
+the two have diverged: ATK's panel has since
+grown Storyline, Draft and Author Styles pages this copy has never had
+and is roughly three times the size. What survives here is the worked
+example of the ports — the smallest complete host, useful for reading and
+for writing a new one. A fix made here reaches nobody. Make it in ATK, and
+mirror it back only if the example is worth keeping current.
+
 **This is the only file in the adapter that imports Qt**, which is what
 keeps `writing_host.py` testable without a QApplication and the engine
 testable without either.

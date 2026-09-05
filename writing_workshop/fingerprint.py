@@ -40,7 +40,7 @@ import re
 import statistics as stats
 
 from . import textio as T
-from .types import Drift, Fingerprint
+from .types import Drift, Fingerprint, Span
 
 #: Sentences per fitting window. Small enough that a suggestion is one
 #: window, large enough that a single short sentence does not dominate.
@@ -316,13 +316,87 @@ def describe(fp: Fingerprint, drifts: list[Drift], limit: int = 3) -> str:
 # ---------------------------------------------------------------------------
 
 
-def from_manuscript(doc, *, sections=None, fitted_on: str = "") -> Fingerprint:
+def from_manuscript(doc, *, sections=None, fitted_on: str = "",
+                    exclude=None) -> Fingerprint:
+    """Fit on the manuscript, optionally MINUS what The Room contributed.
+
+    `exclude` takes the spans from `influence.Influences.spans_in(doc)`.
+    Passing them is what makes this module's central claim true rather
+    than aspirational: a baseline fitted on a draft that already contains
+    the model's rewrites reports that everything matches beautifully,
+    which is the precise failure the fingerprint exists to prevent, and
+    it gets quietly worse the more the author uses The Room.
+    """
+    from .influence import blank
+    spans = list(exclude or [])
     texts = []
     for sec in (sections if sections is not None else doc.sections):
-        body = doc.prose(sec).strip()
+        body = doc.prose(sec)
+        if spans:
+            body = blank(body, [
+                Span(sec.path, s.start - sec.body.start,
+                     s.end - sec.body.start)
+                for s in spans if s.path == sec.path], sec.path)
+        body = body.strip()
         if body:
             texts.append(body)
-    return fit(texts, fitted_on=fitted_on or f"{len(texts)} sections")
+    note = fitted_on or f"{len(texts)} sections"
+    if spans:
+        note += f", {len(spans)} accepted passages excluded"
+    return fit(texts, fitted_on=note)
+
+
+def by_group(doc, assign, *, sections=None) -> dict[str, Fingerprint]:
+    """One baseline per group, where `assign(section) -> str` names it.
+
+    ONE baseline per project is a simplification the code never admitted
+    to. A manual's procedures and its explanatory prose have legitimately
+    different shapes — short imperative steps against long subordinate
+    sentences — so a single fingerprint splits the difference and reports
+    both halves as drifting from a mean neither of them is. The same is
+    true of two characters' dialogue.
+
+    `assign` returning "" drops the section, which is how a caller says
+    "not this one" without filtering the list first.
+    """
+    buckets: dict[str, list[str]] = {}
+    for sec in (sections if sections is not None else doc.sections):
+        name = assign(sec)
+        if not name:
+            continue
+        body = doc.prose(sec).strip()
+        if body:
+            buckets.setdefault(name, []).append(body)
+    return {name: fit(texts, fitted_on=f"{name}: {len(texts)} sections")
+            for name, texts in buckets.items()}
+
+
+def by_speaker(doc, cast: list[str] | None = None,
+               minimum_words: int = 200) -> dict[str, Fingerprint]:
+    """A baseline per speaking character, from their dialogue alone.
+
+    The measurement that answers "does everybody in this book sound the
+    same" — which is the commonest note a first novel gets and the one no
+    metric in this package could previously produce. Characters under
+    `minimum_words` are left out rather than fitted on nothing; a thin
+    baseline that says it is thin is fine, one built from four lines is
+    not.
+    """
+    from . import cast as _cast
+    from . import readaloud
+    who = list(cast or []) or _cast.detect(doc)
+    lines: dict[str, list[str]] = {}
+    for sec in doc.sections:
+        for line in readaloud.passages(doc, sec, cast=who):
+            if line.speaker:
+                lines.setdefault(line.speaker, []).append(line.text)
+    out = {}
+    for name, said in lines.items():
+        text = " ".join(said)
+        if len(text.split()) < minimum_words:
+            continue
+        out[name] = fit([text], fitted_on=f"{name}: {len(said)} lines")
+    return out
 
 
 def save(fp: Fingerprint, path: str | Path) -> Path:

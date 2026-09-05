@@ -87,7 +87,7 @@ def passages(doc, sec, *, max_chars: int = MAX_PASSAGE_CHARS,
     """
     prose = doc.prose_of_file(sec.path)
     body = prose[sec.body.start:sec.body.end]
-    names = {n for n in (cast or [])}
+    names = set(cast or [])
     out: list[Line] = []
     buf: list[tuple[int, int]] = []
     size = 0

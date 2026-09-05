@@ -25,9 +25,8 @@ from __future__ import annotations
 import re
 
 from .. import textio as T
+from ..types import ATTRIBUTE, NUMERIC, RELATIONSHIP, TEMPORAL, Claim, Span
 from ..units import UNITS, split_value, to_base
-from ..types import (ATTRIBUTE, NUMERIC, RELATIONSHIP, TEMPORAL, Claim,
-                     Span)
 
 _NUM = re.compile(r"(?<![\w.])(-?\d[\d,]*(?:\.\d+)?)\s*([A-Za-z°·µ/%]{1,12})?")
 
@@ -68,8 +67,31 @@ COLOURS = {
     "gray", "purple", "orange", "pink", "crimson", "scarlet", "amber",
     "auburn", "blonde", "blond", "chestnut", "hazel", "violet", "ivory",
 }
-_ADJ_PREDICATE = {**{w: "material" for w in MATERIALS},
-                  **{w: "colour" for w in COLOURS}}
+#: The two the original list left out, and the argument for adding them.
+#: Material and colour are where the CLASSIC continuity error lives --
+#: bronze in chapter 3 and steel in chapter 17 -- and the case for keeping
+#: the net narrow was that a broad one fills the Codex with candidates the
+#: author has to dismiss one at a time. That cost has changed: a finding
+#: can now be dismissed ONCE and stay dismissed (`writing_workshop.
+#: findings`), so a slightly wider net is affordable where it was not.
+#:
+#: Size and age are the next two places the error actually lives -- the
+#: tall guard who is short a hundred pages later, the new housing that was
+#: ageing in §2 -- and both remain a CLOSED list rather than "any
+#: adjective", which is the property that made the original narrow.
+SIZES = {
+    "small", "large", "big", "huge", "tiny", "enormous", "vast",
+    "narrow", "wide", "tall", "short", "thick", "thin", "slender",
+    "massive", "immense", "compact", "miniature",
+}
+AGES = {
+    "old", "new", "young", "ancient", "elderly", "modern", "antique",
+    "aged", "brand-new", "newborn", "middle-aged", "venerable",
+}
+_ADJ_PREDICATE = {**dict.fromkeys(MATERIALS, "material"),
+                  **dict.fromkeys(COLOURS, "colour"),
+                  **dict.fromkeys(SIZES, "size"),
+                  **dict.fromkeys(AGES, "age")}
 
 
 def parse_number(text: str) -> tuple[float | None, str]:
@@ -198,7 +220,7 @@ def attribute_claims(doc, subjects: list[str]) -> list[Claim]:
     out: list[Claim] = []
     for src in doc.files:
         prose = doc.prose_of_file(src.rel)
-        for subj_norm, surface in wanted.items():
+        for surface in wanted.values():
             rx = re.compile(
                 r"\b(?:the|a|an|his|her|their|its|my|your|that|this)\s+"
                 r"([a-z]{3,12})\s+" + re.escape(surface) + r"\b", re.I)

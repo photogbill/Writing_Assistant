@@ -21,18 +21,24 @@ Two consequences of that, both deliberate:
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
 
+from . import formats as F
 from . import textio as T
 from .errors import ProjectError
 from .types import Paragraph, Section, Span
 
 #: What counts as manuscript. `.txt` is included because a great many
 #: novels are written in one, and refusing to read them would be a purity
-#: the author pays for.
-SUFFIXES = (".md", ".markdown", ".txt")
+#: the author pays for. `.docx` is included because most 200-page manuals
+#: are one, they are not going to be converted first, and a workshop that
+#: cannot open the document it was designed for is not much of a
+#: workshop. A `.docx` is READ-ONLY here and its file is never written —
+#: see `writing_workshop.formats` and `SourceFile.derived`.
+SUFFIXES = (".md", ".markdown", ".txt", *F.DERIVED_SUFFIXES)
 
 #: Never walked into. `.workshop` is ours; the rest are the folders every
 #: project grows and none of them are the book.
@@ -55,10 +61,22 @@ class SourceFile:
     text: str
     blocks: list[T.Block] = field(default_factory=list)
     prose: str = ""
+    #: True when `text` was DERIVED from the file rather than read from
+    #: it — a `.docx`, today. It matters to two things and both would be
+    #: wrong without it: offsets point into the derived text and not into
+    #: anything a host could put a cursor in, and checks whose premise is
+    #: "the source is the truth, not the render" are false here, because
+    #: for a Word document the render owns the numbering.
+    derived: bool = False
 
     @property
     def stem(self) -> str:
         return self.path.stem
+
+    @property
+    def clickable(self) -> bool:
+        """Can a host jump to an offset in this file? Not for a .docx."""
+        return not self.derived
 
 
 @dataclass
@@ -70,11 +88,28 @@ class Manuscript:
     sections: list[Section] = field(default_factory=list)
     _by_id: dict[str, Section] = field(default_factory=dict)
     _prose: dict[str, str] = field(default_factory=dict)
+    # ---- caches -----------------------------------------------------
+    # A Manuscript is IMMUTABLE once loaded. `Project.manuscript()`
+    # re-reads from disk on every call precisely so that nothing here has
+    # to be invalidated, which is what makes these caches safe by
+    # construction rather than by discipline. Before them, `quote()` re-
+    # split the whole file into sentences on every call: thirteen quotes
+    # cost thirty-nine of the forty seconds one craft check spent.
+    _sent: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    _sent_at: dict[str, list[int]] = field(default_factory=dict)
+    _paras: dict[str, list[Paragraph]] = field(default_factory=dict)
+    _sec_at: dict[str, tuple[list[int], list[Section]]] = field(
+        default_factory=dict)
+    _found: dict[tuple[str, bool], list[Span]] = field(default_factory=dict)
+    #: (path, why) for every file that could not be read. Never raised:
+    #: one bad file must not cost the author the other thirty-nine, and
+    #: rule 4 says the report has to name what was not done.
+    unreadable: list[tuple[str, str]] = field(default_factory=list)
 
     # -- loading ----------------------------------------------------------
 
     @classmethod
-    def load(cls, root: str | Path) -> "Manuscript":
+    def load(cls, root: str | Path) -> Manuscript:
         root = Path(root)
         if not root.exists():
             raise ProjectError(
@@ -96,17 +131,30 @@ class Manuscript:
                                     p.relative_to(root).parts))
         doc = cls(root=base)
         for path in paths:
-            try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                # A manuscript written on Windows in a previous decade. Read
-                # it rather than refusing it; the author cares about the
-                # book, not about its encoding.
-                text = path.read_text(encoding="cp1252", errors="replace")
+            derived = F.is_derived(path)
+            if derived:
+                try:
+                    text = F.read(path)
+                except Exception as exc:               # noqa: BLE001
+                    # One unreadable file must not cost the author the
+                    # other thirty-nine. It is reported rather than
+                    # raised, because a manuscript that will not open at
+                    # all is the one failure this loader must not have.
+                    doc.unreadable.append((str(path), str(exc)))
+                    continue
+            else:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    # A manuscript written on Windows in a previous
+                    # decade. Read it rather than refusing it; the author
+                    # cares about the book, not about its encoding.
+                    text = path.read_text(encoding="cp1252",
+                                          errors="replace")
             rel = (path.name if root.is_file()
                    else str(path.relative_to(root)).replace("\\", "/"))
             src = SourceFile(path=path, rel=rel, text=text,
-                             blocks=T.scan_blocks(text))
+                             blocks=T.scan_blocks(text), derived=derived)
             src.prose = T.prose_of(text)
             doc.files.append(src)
             doc._prose[rel] = src.prose
@@ -210,7 +258,32 @@ class Manuscript:
         parents = {s.parent_id for s in self.sections if s.parent_id}
         return [s for s in self.sections if s.id not in parents]
 
+    def sentences_of_file(self, rel: str) -> list[tuple[int, int]]:
+        """Sentence spans over one file's prose, computed once.
+
+        Every check that walks sentences and every `quote()` shares this.
+        """
+        hit = self._sent.get(rel)
+        if hit is None:
+            hit = T.sentences(self._prose.get(rel, ""))
+            self._sent[rel] = hit
+            self._sent_at[rel] = [s for s, _e in hit]
+        return hit
+
+    def sentence_at(self, span: Span) -> tuple[int, int] | None:
+        """The sentence containing a span — a bisect, not a scan."""
+        spans = self.sentences_of_file(span.path)
+        starts = self._sent_at[span.path]
+        i = bisect.bisect_right(starts, span.start) - 1
+        if 0 <= i < len(spans) and spans[i][0] <= span.start < spans[i][1]:
+            return spans[i]
+        return None
+
     def paragraphs(self, sec: Section | None = None) -> list[Paragraph]:
+        key = sec.id if sec is not None else ""
+        cached = self._paras.get(key)
+        if cached is not None:
+            return cached
         out: list[Paragraph] = []
         targets = [sec] if sec else self.sections
         for target in targets:
@@ -232,6 +305,7 @@ class Manuscript:
                     section_id=target.id, index=idx, text=masked.strip(),
                     span=Span(src.rel, block.start, block.end)))
                 idx += 1
+        self._paras[key] = out
         return out
 
     def scenes(self, sec: Section) -> list[Span]:
@@ -261,6 +335,32 @@ class Manuscript:
     @property
     def words(self) -> int:
         return sum(len(T.word_list(p)) for p in self._prose.values())
+
+    @property
+    def derived_files(self) -> list[SourceFile]:
+        """Files whose text this package produced rather than read."""
+        return [s for s in self.files if s.derived]
+
+    def notes(self) -> list[str]:
+        """What a host should tell the author about this manuscript.
+
+        Rule 4, as a method: a report that measured a Word document has
+        to say that its offsets are not positions in the author's file,
+        and one that could not read a file has to say which.
+        """
+        out = []
+        derived = self.derived_files
+        if derived:
+            names = ", ".join(s.rel for s in derived[:4])
+            out.append(
+                f"{len(derived)} file(s) read as text rather than edited "
+                f"in place ({names}"
+                + ("…" if len(derived) > 4 else "")
+                + "). Findings name the section and quote the sentence; "
+                  "they cannot point at a position in a .docx.")
+        for path, why in self.unreadable:
+            out.append(f"Could not read {path}: {why}")
+        return out
 
     def outline(self, max_level: int = 6) -> list[Section]:
         return [s for s in self.sections if s.level <= max_level]
@@ -295,6 +395,10 @@ class Manuscript:
         """
         if not needle.strip():
             return []
+        key = (needle.strip(), whole_word)
+        cached = self._found.get(key)
+        if cached is not None:
+            return cached
         pattern = re.escape(needle.strip())
         if whole_word:
             pattern = rf"(?<!\w){pattern}(?!\w)"
@@ -303,21 +407,39 @@ class Manuscript:
         for rel, prose in self._prose.items():
             for m in rx.finditer(prose):
                 hits.append(Span(rel, m.start(), m.end()))
+        # The Red Thread and name drift ask for the same names one after
+        # the other; without this the book is scanned twice for each.
+        self._found[key] = hits
         return hits
 
     def section_at(self, span: Span) -> Section | None:
-        best = None
-        for sec in self.sections:
-            if sec.path == span.path and sec.span.start <= span.start < sec.span.end:
-                if best is None or sec.level >= best.level:
-                    best = sec
-        return best
+        """Which section a position is in — a bisect, not a scan.
+
+        `_derive_sections` runs every section from its heading to the
+        NEXT heading of any level, so the spans within a file are
+        disjoint and contiguous: exactly one can contain a position, and
+        the old deepest-level tie-break could never fire. This returns
+        the same section and stops being O(sections) per hit — which it
+        was, called once per finding, per claim and per mention.
+        """
+        index = self._sec_at.get(span.path)
+        if index is None:
+            here = [s for s in self.sections if s.path == span.path]
+            here.sort(key=lambda s: s.span.start)
+            index = ([s.span.start for s in here], here)
+            self._sec_at[span.path] = index
+        starts, here = index
+        i = bisect.bisect_right(starts, span.start) - 1
+        if 0 <= i < len(here) and here[i].span.start <= span.start < \
+                here[i].span.end:
+            return here[i]
+        return None
 
     def quote(self, span: Span, pad: int = 0) -> str:
         """The sentence a span sits in — evidence, not a character range."""
         prose = self._prose.get(span.path, "")
-        for start, end in T.sentences(prose):
-            if start <= span.start < end:
-                return " ".join(prose[start:end].split())
+        found = self.sentence_at(span)
+        if found is not None:
+            return " ".join(prose[found[0]:found[1]].split())
         lo = max(0, span.start - pad)
         return " ".join(prose[lo:span.end + pad].split())

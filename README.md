@@ -16,8 +16,12 @@ in any other application, with no Qt and no GPU.
 
 ```
 pip install -e .
-workshop craft   path/to/project     # the measurements
-workshop continuity path/to/project  # contradictions, threads, names
+workshop craft   path/to/project --remember   # the measurements
+workshop craft   path/to/project --new        # only what appeared since
+workshop dismiss path/to/project <key> --reason "deliberate"
+workshop continuity path/to/project           # contradictions, threads
+workshop drift   path/to/project --since before-the-room
+workshop checks  path/to/project              # what this build measures
 workshop budget  path/to/project --model Magistral-24B --tokens 40960
 ```
 
@@ -48,6 +52,26 @@ you when it is not.
 developed across three chapters, then absent for twelve with no
 resolution. Chekhov's gun, found by arithmetic.
 
+**The book measured against its own past.** The fingerprint scores a
+suggestion before it is offered; that catches one sentence at a time,
+which is exactly the level at which convergence is invisible — *each edit
+looks like an improvement*. So fit the baseline on a draft you name
+("before I started using The Room") and score the manuscript as it is now,
+chapter by chapter. Nothing new is stored to do it: named versions are
+already folders of plain files.
+
+**Findings you can be done with.** Every finding has a content key derived
+from what it is about rather than from where it is, so dismissing one
+survives the paragraph moving; and the run before this one is remembered,
+so the question "what appeared since Monday" has an answer. An afternoon
+in one chapter should produce a short list, not the same nine hundred
+rows.
+
+**The check you write yourself.** *"Never write 'simply'."* *"Say
+'select', not 'click'."* A pattern, a message, a severity, in
+`.workshop/rules.json` — offline, incapable of inventing a finding, and
+the thing a documentation team asks for first.
+
 ## Four rules
 
 1. **Nothing writes into the manuscript but the author.** Not the
@@ -69,13 +93,31 @@ highest-slop-risk feature in the category, because it trains the author to
 accept the model's next word thousands of times a session, below the level
 where any of them is a decision.
 
+## What it will not do to be quick
+
+**Nothing is ever dropped for taking too long.** There is no time budget
+in any pass and there must not be one. An operator who has offloaded
+layers to the CPU has *chosen* to wait, and a check the tool abandoned on
+a timer is a silent gap in a report whose fourth rule is that it says what
+it did not do. A slow pass gets progress and a cancel button; the decision
+to stop is the operator's.
+
+That is also why the sentence splitter's cost was a defect rather than a
+tuning problem. It was quadratic — a copy and a scan of the whole
+remainder of the file for every `.!?…` — so a craft pass over an 81,000-
+word document did not finish in five minutes. It is linear now, byte for
+byte the same output, and the same pass takes about three seconds. Being
+fast is not the point; being *able to finish* is.
+
 ## The manuscript is never locked inside the tool
 
-A project is a folder of `.md` files. **The outline is derived, never
+A project is a folder of `.md`, `.txt` or (read-only) `.docx` files. **The outline is derived, never
 stored** — the headings in the files are the structure, so there is
 nothing to get out of sync and the author can reorganise in any editor
 they like. Everything this package knows lives in one `.workshop/` folder
-beside them. Delete it and you still have the book.
+beside them — the project settings, the Codex, your style baseline, the
+findings you dismissed, the passages you took from The Room. Delete it and
+you still have the book, and a `.docx` is never written to at all.
 
 ## Layout
 
@@ -93,10 +135,27 @@ beside them. Delete it and you still have the book.
 | `export/` | Shunn manuscript format and numbered `.docx` structure |
 | `readaloud` | passages on demand, chapters as a batch |
 | `ports` | everything the host provides, with a working default for each |
+| `findings` | a finding's identity, the dismissal list, the delta |
+| `state` | the one module that writes `.workshop/` side files |
+| `rules` | the project's own checks, declared rather than coded |
+| `doctypes` | technical, fiction, lyrics — and the ones a project declares |
+| `drift` | the manuscript against a named earlier draft |
+| `influence` | which prose came from The Room, kept out of the manuscript |
+| `formats` | `.docx`, read-only, standard library |
+| `cast` | who is in this book, when the project has not said |
 
-`adapters/atk/` is **outside** the package on purpose: it is the only code
-that imports `atk.*` and PySide6, and a test in this repo fails the build
-if anything under `writing_workshop/**` ever does.
+`adapters/atk/` is **outside** the package on purpose: nothing under
+`writing_workshop/**` may import `atk.*` or PySide6, and a test in this
+repo fails the build if it ever does.
+
+**What `adapters/atk/` is NOT, stated because it used to say otherwise.**
+It is a REFERENCE implementation of a host, not the adapter ATK ships. ATK
+has its own — `atk/core/writing.py`, `atk/core/writing_host.py` and
+`atk/ui/writing_panel.py` — which has since grown three pages this copy
+has never had (Storyline, Draft, Author Styles) and is three times the
+size. ATK does not read this folder at all. Keep it as the worked example
+of the ports; do not treat it as the current ATK surface, and do not fix a
+bug here expecting ATK to change.
 
 ## Hosting it
 
@@ -120,7 +179,7 @@ for finding in report.problems():
 python -m unittest discover -s tests -t tests
 ```
 
-168 checks, no third-party dependency, no Qt, no model. They are
+225 checks, no third-party dependency, no Qt, no model. They are
 `unittest`-style deliberately: a pytest-only suite is silently collected as
 *nothing* by `unittest discover`, which reports OK while tests are failing,
 and a suite that can lie about being green is worse than no suite.

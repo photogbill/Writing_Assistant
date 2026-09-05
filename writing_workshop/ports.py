@@ -19,12 +19,13 @@ render as "that part needs a model loaded" rather than as a crash.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 import datetime as _dt
 import math
 import re
 import threading
-from typing import Any, Iterable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from .errors import NoModelError
 

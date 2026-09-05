@@ -23,7 +23,7 @@ from pathlib import Path
 import sys
 import unittest
 
-from _base import *                                  # noqa: F401,F403
+from _base import *  # noqa: F401,F403
 
 PACKAGE = Path(__file__).resolve().parents[1] / "writing_workshop"
 FORBIDDEN_PREFIXES = ("atk", "PySide6", "PyQt5", "PyQt6", "shiboken6")
@@ -99,7 +99,13 @@ class NothingWritesTheManuscript(unittest.TestCase):
     ALLOWED = {"versions.py",     # named drafts + an explicit restore
                "project.py",      # .workshop/project.json only
                "fingerprint.py",  # .workshop/fingerprint.json only
+               "state.py",        # every other .workshop/ side file
                "cli.py"}          # --out, which the operator typed
+
+    #: Anything that needs to persist goes through `state.Store` rather
+    #: than opening a file of its own. An allow-list that grows by one
+    #: entry per feature is not a guard, and this one is the whole reason
+    #: the author's editor is the only thing that writes the book.
 
     def test_no_module_writes_text_except_the_named_ones(self):
         offenders = []

@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 
 from _base import MANUAL, NOVEL
-from writing_workshop import DEFECT, FICTION, Manuscript, TECHNICAL, WARN
+from writing_workshop import DEFECT, FICTION, Manuscript, TECHNICAL
 from writing_workshop.craft import REGISTRY, run
 
 

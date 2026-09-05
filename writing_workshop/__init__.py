@@ -38,24 +38,24 @@ from .errors import (BandZeroWontFit, LedgerUnavailable, NoModelError,
 from .ports import (Cancel, CollectingEvents, Host, KeywordRetriever,
                     ModelInfo, NoLedger, NoSpeech, NullLLM, Retrieved,
                     SilentEvents, Voice)
-from .project import Project
-from .types import (ACCEPTED, ATTRIBUTE, DEFECT, FICTION, NOTE, NUMERIC,
-                    PROPOSED, RELATIONSHIP, SUPERSEDED, TECHNICAL, TEMPORAL,
-                    WARN, Assembly, Budget, Candidate, Claim, Conflict,
-                    CraftReport, Drift, Finding, Fingerprint, Hunk,
-                    Paragraph, Section, Span, Suggestion, Thread,
+from .project import House, Project
+from .types import (ACCEPTED, ATTRIBUTE, DEFECT, FICTION, LYRICS, NOTE,
+                    NUMERIC, PROPOSED, RELATIONSHIP, SUPERSEDED, TECHNICAL,
+                    TEMPORAL, WARN, Assembly, Budget, Candidate, Claim,
+                    Conflict, CraftReport, Drift, Finding, Fingerprint,
+                    Hunk, Paragraph, Section, Span, Suggestion, Thread,
                     VersionInfo)
 from .version import __version__
 
 __all__ = [
-    "__version__", "Manuscript", "SourceFile", "Project", "Host",
+    "__version__", "Manuscript", "SourceFile", "Project", "House", "Host",
     "NullLLM", "KeywordRetriever", "NoLedger", "NoSpeech", "SilentEvents",
     "CollectingEvents", "Cancel", "ModelInfo", "Retrieved", "Voice",
     "WorkshopError", "ProjectError", "BandZeroWontFit", "NoModelError",
     "LedgerUnavailable", "Span", "Section", "Paragraph", "Finding",
     "CraftReport", "Claim", "Conflict", "Thread", "Candidate", "Assembly",
     "Budget", "Fingerprint", "Drift", "Suggestion", "Hunk", "VersionInfo",
-    "NOTE", "WARN", "DEFECT", "TECHNICAL", "FICTION", "ATTRIBUTE",
-    "RELATIONSHIP", "TEMPORAL", "NUMERIC", "PROPOSED", "ACCEPTED",
-    "SUPERSEDED",
+    "NOTE", "WARN", "DEFECT", "TECHNICAL", "FICTION", "LYRICS",
+    "ATTRIBUTE", "RELATIONSHIP", "TEMPORAL", "NUMERIC", "PROPOSED",
+    "ACCEPTED", "SUPERSEDED",
 ]

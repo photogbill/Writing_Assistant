@@ -1,0 +1,37 @@
+# ============================================================================
+#  Line endings, declared rather than left to whoever cloned it.
+#
+#  WHY THIS FILE EXISTS. `install.bat` is stored in this repository with
+#  LF-only line endings, and on disk it has CRLF. That difference is not
+#  cosmetic: cmd.exe reads a batch file by BYTE OFFSET, and with LF endings
+#  a `goto` past a label can land mid-line and run something else. ATK hit
+#  exactly this on 2026-08-07, when every .bat in that project was rewritten
+#  with LF and install.bat failed halfway through a wipe. ATK's own
+#  .gitattributes has said `*.bat text eol=crlf` ever since; this repo has
+#  never had one, so what a fresh clone gets has depended on the cloner's
+#  `core.autocrlf` — which is to say, on luck.
+#
+#  Renormalise the working tree after adding this file:
+#      git add --renormalize .
+# ============================================================================
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+*.py    text eol=lf
+*.pyi   text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Word documents are a zip. Never touch them.
+*.docx  binary
+*.doc   binary
+*.pdf   binary
+*.png   binary
+*.jpg   binary

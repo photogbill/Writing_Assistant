@@ -31,8 +31,16 @@ from .. import fingerprint as FP
 from ..errors import NoModelError
 from ..ports import NEVER, Host
 from ..types import Claim, Fingerprint, Section, Suggestion
-from .personas import (ADVERSARY, ALL, CONTINUITY_READER, EXPANDER,
-                       LINE_EDITOR, Persona, for_document, get)
+from .personas import (
+    ADVERSARY,
+    ALL,
+    CONTINUITY_READER,
+    EXPANDER,
+    LINE_EDITOR,
+    Persona,
+    for_document,
+    get,
+)
 
 __all__ = ["Room", "Persona", "for_document", "get", "ALL", "LINE_EDITOR",
            "CONTINUITY_READER", "EXPANDER", "ADVERSARY", "Critique"]
@@ -102,6 +110,32 @@ class Room:
         suggestion.drift_score = FP.drift_score(suggestion.drifts)
         suggestion.note = FP.describe(self.fingerprint, suggestion.drifts)
         return suggestion
+
+    # -- what the author took ---------------------------------------------
+
+    def accepted(self, suggestion: Suggestion, influences, *, at: str = "",
+                 note: str = "") -> bool:
+        """Record that the author took this text. Call it on ACCEPT.
+
+        The host calls this at the moment the suggestion goes into the
+        manuscript — by the author's keystroke, as always; nothing here
+        writes a word of it. What is recorded is a note in `.workshop/`
+        saying that this passage came from a persona.
+
+        It exists because the fingerprint's central claim was
+        unenforceable without it. `fit()` has always said that fitting a
+        baseline on a draft containing the model's rewrites "bakes the
+        drift into the baseline, and the tool then reports that
+        everything matches beautifully — the exact failure it exists to
+        prevent", and nothing tracked which prose that was. A defence
+        that quietly disarms itself the more it is used is worse than
+        none, because it reports success.
+        """
+        if influences is None or not suggestion.text.strip():
+            return False
+        return influences.record(
+            suggestion.text, persona=suggestion.persona, at=at,
+            note=note or suggestion.rationale)
 
     # -- the one place that talks to a model ------------------------------
 

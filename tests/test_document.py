@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 
 from _base import MANUAL, NOVEL, TempProject
-from writing_workshop import Manuscript, Project, Span
+from writing_workshop import Manuscript, Project
 
 
 class Structure(unittest.TestCase):

@@ -14,10 +14,17 @@ from collections import defaultdict
 import re
 
 from .. import textio as T
+from ..types import (
+    ATTRIBUTE,
+    NUMERIC,
+    REJECTED,
+    RELATIONSHIP,
+    TEMPORAL,
+    Claim,
+    Conflict,
+)
 from ..units import conflict as _values_conflict
 from ..units import dimension, split_value
-from ..types import (ATTRIBUTE, NUMERIC, REJECTED, RELATIONSHIP, TEMPORAL,
-                     Claim, Conflict)
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
@@ -42,8 +49,31 @@ def _when_key(value: str) -> tuple[str, float | str] | None:
     return None
 
 
-def find(claims: list[Claim], *, include_proposed: bool = True
-         ) -> list[Conflict]:
+def arc(group: list[Claim], order: dict[str, int]) -> list[dict]:
+    """Every value this subject takes, in reading order, with its run.
+
+    The view that turns a contradiction into a chronology. Values are
+    collapsed on their normalised text, so five mentions of "bronze"
+    across four chapters are one stretch and not five rows.
+    """
+    rows: list[dict] = []
+    ordered = sorted(group, key=lambda c: (order.get(c.section_id, 0),
+                                           c.id))
+    for claim in ordered:
+        at = order.get(claim.section_id, 0)
+        value = T.normalise(claim.value)
+        if rows and rows[-1]["value"] == value:
+            rows[-1]["last"] = max(rows[-1]["last"], at)
+            rows[-1]["count"] += 1
+            continue
+        rows.append({"value": value, "shown": claim.value, "first": at,
+                     "last": at, "count": 1,
+                     "ref": claim.source_ref})
+    return rows
+
+
+def find(claims: list[Claim], *, include_proposed: bool = True,
+         order: dict[str, int] | None = None) -> list[Conflict]:
     """Every pair of claims about one subject-and-predicate that disagree.
 
     Grouped by `Claim.key`, which is subject plus predicate lowercased —
@@ -59,15 +89,51 @@ def find(claims: list[Claim], *, include_proposed: bool = True
     for claim in live:
         groups[claim.key].append(claim)
 
+    at = dict(order or {})
     out: list[Conflict] = []
     for _key, group in groups.items():
         if len(group) < 2:
             continue
-        for i, a in enumerate(group):
-            for b in group[i + 1:]:
+        shape = arc(group, at) if at else []
+        # ONE conflict per pair of distinct VALUES, not per pair of
+        # claims. This was per pair of claims, and the arithmetic of that
+        # is brutal: forty mentions of a bronze sword against twelve of a
+        # steel one is 480 findings that all say the same sentence.
+        # Measured at 5,821 conflicts on one manuscript, which is not a
+        # continuity report, it is a denial of service against the person
+        # reading it.
+        #
+        # The representative of a value is its EARLIEST claim, so the
+        # quoted passage is where the value is established rather than
+        # wherever it last happened to appear.
+        seen: dict[str, tuple[int, Claim, int]] = {}
+        for claim in group:
+            value = T.normalise(claim.value)
+            position = at.get(claim.section_id, 0)
+            found = seen.get(value)
+            if found is None:
+                seen[value] = (position, claim, 1)
+            else:
+                keep = found if found[0] <= position else (position, claim,
+                                                           0)
+                seen[value] = (keep[0], keep[1], found[2] + 1)
+        values = sorted(seen.values(), key=lambda row: (row[0], row[1].id))
+        for i, (_pa, a, count_a) in enumerate(values):
+            for _pb, b, count_b in values[i + 1:]:
                 conflict = _compare(a, b)
-                if conflict is not None:
-                    out.append(conflict)
+                if conflict is None:
+                    continue
+                # Earlier side first, always. A conflict reported
+                # backwards reads as the author having changed their mind
+                # in reverse, which is a sentence nobody can act on.
+                if at.get(b.section_id, 0) < at.get(a.section_id, 0):
+                    conflict.a, conflict.b = conflict.b, conflict.a
+                    count_a, count_b = count_b, count_a
+                conflict.a_order = at.get(conflict.a.section_id, 0)
+                conflict.b_order = at.get(conflict.b.section_id, 0)
+                conflict.arc = shape
+                conflict.mentions = (count_a, count_b)
+                out.append(conflict)
     out.sort(key=lambda c: (not c.deterministic, c.a.subject))
     return out
 

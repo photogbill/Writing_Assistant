@@ -76,7 +76,16 @@ exclude = [".venv", "adapters"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "C4", "SIM"]
-ignore = ["E501", "B008", "SIM105", "SIM102"]
+#: I001 is DELIBERATELY off, and it is worth saying why rather than
+#: leaving twenty-eight permanent findings for somebody to "fix" one day.
+#: This repo hand-wraps its imports compactly to 79 columns. `ruff check
+#: --fix` cannot produce that -- it explodes every multi-name import to
+#: one name per line -- and the layout it wants comes from `ruff format`,
+#: which would rewrite about 7,500 lines of this repo in a style it does
+#: not use. So the choice is: a lint that is permanently noisy, a
+#: reformat nobody asked for, or saying out loud that the import style
+#: here is hand-maintained. This is the third.
+ignore = ["E501", "B008", "SIM105", "SIM102", "I001"]
 
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false

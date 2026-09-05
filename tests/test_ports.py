@@ -8,7 +8,7 @@ import unittest
 from _base import MANUAL
 from writing_workshop import KeywordRetriever, Manuscript, NoModelError
 from writing_workshop.ports import (Cancel, CollectingEvents, Host,
-                                    NoLedger, NoSpeech, NullLLM, Retrieved)
+                                    NullLLM, Retrieved)
 
 
 class Defaults(unittest.TestCase):

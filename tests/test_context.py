@@ -6,11 +6,10 @@ from __future__ import annotations
 import unittest
 
 from _base import MANUAL
-from writing_workshop import (Assembly, BandZeroWontFit, Manuscript,
-                              ModelInfo)
+
+from writing_workshop import BandZeroWontFit, Manuscript, ModelInfo
 from writing_workshop import context as CT
-from writing_workshop.context.assembler import (BAND_INVARIANT, BAND_PRIOR,
-                                                BAND_SPINE, assemble)
+from writing_workshop.context.assembler import BAND_INVARIANT, assemble
 from writing_workshop.types import Budget, Candidate
 
 
@@ -149,9 +148,9 @@ class Ordering(unittest.TestCase):
         longest prefix shared with the PREVIOUS call. If the prefix moves
         between requests, every request pays a full prefill."""
         doc = Manuscript.load(MANUAL)
-        common = dict(style_card="Short sentences.",
-                      document_rules="Use shall.", budget=budget(20000),
-                      include_prior=False)
+        common = {"style_card": "Short sentences.",
+                  "document_rules": "Use shall.", "budget": budget(20000),
+                  "include_prior": False}
         a = CT.build(doc, doc.sections[2], request="One.", **common)
         b = CT.build(doc, doc.sections[3], request="Two.", **common)
         prefix = a.text[:a.text.index("Established facts")] \

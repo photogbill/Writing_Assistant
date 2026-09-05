@@ -15,7 +15,7 @@ import re
 
 from .. import textio as T
 from ..types import FICTION, NOTE, WARN, CraftReport, Finding, Span
-from . import Ctx, check
+from . import ANY_LANGUAGE, Ctx, check
 from .shared import describe, detect_cast
 
 _DQUOTE = re.compile(r"[\"“]([^\"“”]{2,600}?)[\"”]", re.S)
@@ -41,7 +41,7 @@ def _quoted_spans(text: str) -> list[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 
 
-@check("pacing", "Pacing curve", FICTION)
+@check("pacing", "Pacing curve", FICTION, languages=ANY_LANGUAGE)
 def pacing(ctx: Ctx) -> CraftReport:
     """Scene and chapter lengths over the document, as a series to draw.
 
@@ -93,7 +93,8 @@ def pacing(ctx: Ctx) -> CraftReport:
 # ---------------------------------------------------------------------------
 
 
-@check("dialogue", "Dialogue-to-narration ratio", FICTION)
+@check("dialogue", "Dialogue-to-narration ratio", FICTION,
+       languages=ANY_LANGUAGE)
 def dialogue(ctx: Ctx) -> CraftReport:
     rep = CraftReport()
     rows = {}
@@ -276,7 +277,7 @@ def presence(ctx: Ctx) -> CraftReport:
         if not present:
             continue
         longest, at = 0, 0
-        for a, b in zip(present, present[1:]):
+        for a, b in zip(present, present[1:], strict=False):
             if b - a - 1 > longest:
                 longest, at = b - a - 1, a
         trailing = len(row) - 1 - present[-1]

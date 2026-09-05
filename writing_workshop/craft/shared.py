@@ -13,9 +13,10 @@ import math
 import re
 import statistics as stats
 
+from .. import cast as _cast
 from .. import textio as T
-from ..types import NOTE, WARN, CraftReport, Finding, Span
-from . import Ctx, check
+from ..types import FICTION, NOTE, TECHNICAL, WARN, CraftReport, Finding, Span
+from . import ANY_LANGUAGE, Ctx, check
 
 # ---------------------------------------------------------------------------
 # helpers shared with technical.py and fiction.py
@@ -29,46 +30,23 @@ def sentence_spans(ctx: Ctx, sec) -> list[tuple[int, int]]:
     return T.sentences(body, base=sec.body.start)
 
 
-_NAME = re.compile(r"\b([A-Z][a-z]{2,}(?:['\u2019-][A-Z]?[a-z]+)?)\b")
-
-
 def detect_cast(ctx: Ctx, minimum: int = 4) -> list[str]:
-    """Who is in this book, when the project has not said.
+    """Who is in this book — `writing_workshop.cast`, with the project's
+    own list taking precedence.
 
-    A name is a capitalised word that appears often and NOT only at the
-    start of sentences -- the second half is what keeps `Then`, `However`
-    and `Suddenly` out of the cast list, and it costs one comparison.
+    The detection moved to its own module when the Codex needed it too:
+    without it `codex.deterministic()` read no attribute claims at all
+    for a project whose author had not typed a cast list, which is most
+    of them on the first run.
 
-    Lives in `shared` rather than in `fiction` because `echo` needs it
-    too: a character called Aleksandr is SUPPOSED to appear twice in a
-    paragraph, and an echo check that does not know the cast trains the
-    author to ignore it.
+    It stays reachable from here because `echo` needs it as much as
+    `pov` and `presence` do — a character called Aleksandr is SUPPOSED to
+    appear twice in a paragraph, and an echo check that does not know the
+    cast trains the author to ignore it.
     """
     if ctx.cast:
         return list(ctx.cast)
-    counts: Counter = Counter()
-    mid_sentence: Counter = Counter()
-    for sec in ctx.doc.sections:
-        prose = ctx.doc.prose_of_file(sec.path)
-        for s, e in sentence_spans(ctx, sec):
-            text = prose[s:e]
-            for m in _NAME.finditer(text):
-                word = m.group(1)
-                if T.is_common(word) or len(word) < 3:
-                    continue
-                counts[word] += 1
-                if m.start() > 1:
-                    mid_sentence[word] += 1
-                    # ONE mid-sentence appearance is enough. The job of
-                    # this test is to reject sentence-openers like
-                    # "Meanwhile" and "Nevertheless", and those essentially
-                    # never appear capitalised mid-sentence; asking for a
-                    # third of all mentions instead threw out real names in
-                    # any book where a character mostly starts sentences.
-    return sorted(
-        (name for name, n in counts.items()
-         if n >= minimum and mid_sentence[name] >= 1),
-        key=lambda n: -counts[n])[:40]
+    return _cast.detect(ctx.doc, minimum=minimum)
 
 
 def vocabulary(ctx: Ctx, floor: int) -> set[str]:
@@ -118,7 +96,8 @@ def describe(values: list[float]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@check("lengths", "Sentence and paragraph lengths")
+@check("lengths", "Sentence and paragraph lengths", TECHNICAL, FICTION,
+       languages=ANY_LANGUAGE)
 def lengths(ctx: Ctx) -> CraftReport:
     """The SHAPE, not just the mean. Rhythm lives in the variance.
 
@@ -172,7 +151,8 @@ def lengths(ctx: Ctx) -> CraftReport:
 # ---------------------------------------------------------------------------
 
 
-@check("echo", "Echoes — a distinctive word reused close by")
+@check("echo", "Echoes — a distinctive word reused close by",
+       TECHNICAL, FICTION)
 def echo(ctx: Ctx) -> CraftReport:
     """A distinctive word reused within N words.
 
@@ -230,7 +210,8 @@ def _section_id(ctx: Ctx, rel: str, pos: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-@check("readability", "Readability (a proxy, and stated as one)")
+@check("readability", "Readability (a proxy, and stated as one)",
+       TECHNICAL, FICTION)
 def readability(ctx: Ctx) -> CraftReport:
     """Flesch Reading Ease and Flesch–Kincaid grade, per section.
 
@@ -300,7 +281,7 @@ _LY_KEEP = {"only", "early", "family", "reply", "supply", "apply", "likely",
             "monthly", "yearly", "friendly", "lovely", "assembly"}
 
 
-@check("filter_words", "Filter words and adverbs")
+@check("filter_words", "Filter words and adverbs", TECHNICAL, FICTION)
 def filter_words(ctx: Ctx) -> CraftReport:
     """Counted, not opined about.
 
@@ -364,7 +345,7 @@ IRREGULAR = {
     "paid", "put", "read", "run", "said", "seen", "sent", "set", "shown",
     "shut", "sold", "spoken", "spent", "split", "stood", "struck", "taken",
     "taught", "told", "thought", "thrown", "understood", "worn", "won",
-    "written", "drawn", "torn", "born", "beaten", "bound", "cast", "dealt",
+    "written", "torn", "born", "beaten", "bound", "cast", "dealt",
     "fed", "fit", "hurt", "lit", "proven", "rung", "sung", "sunk", "sworn",
 }
 
@@ -376,12 +357,11 @@ def _is_participle(word: str) -> bool:
     w = T.normalise(word)
     if w in IRREGULAR:
         return True
-    if len(w) > 4 and w.endswith("ed") and w not in _NOT_PARTICIPLE:
-        return True
-    return False
+    return (len(w) > 4 and w.endswith("ed")
+            and w not in _NOT_PARTICIPLE)
 
 
-@check("passive", "Passive voice rate")
+@check("passive", "Passive voice rate", TECHNICAL, FICTION)
 def passive(ctx: Ctx) -> CraftReport:
     """A be-verb plus a past participle, with an adverb allowed between.
 
@@ -427,7 +407,8 @@ def passive(ctx: Ctx) -> CraftReport:
 # ---------------------------------------------------------------------------
 
 
-@check("openers", "Sentence openings")
+@check("openers", "Sentence openings", TECHNICAL, FICTION,
+       languages=ANY_LANGUAGE)
 def openers(ctx: Ctx) -> CraftReport:
     """How many consecutive sentences start `The`, `He`, `It`.
 
@@ -480,7 +461,7 @@ def _flush_run(ctx, rep, sec, run, word, run_min) -> None:
 # ---------------------------------------------------------------------------
 
 
-@check("stock_phrases", "Repeated phrases")
+@check("stock_phrases", "Repeated phrases", TECHNICAL, FICTION)
 def stock_phrases(ctx: Ctx) -> CraftReport:
     """Four-word phrases the document repeats.
 

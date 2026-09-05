@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """ATK's Port implementations. Destination: `atk/core/writing_host.py`.
 
+**REFERENCE COPY, NOT THE SHIPPED ADAPTER — read this before fixing
+anything here.** ATK carries its own
+`atk/core/writing_host.py`, it does not import `adapters/` at all, and
+the two have diverged: ATK's panel has since
+grown Storyline, Draft and Author Styles pages this copy has never had
+and is roughly three times the size. What survives here is the worked
+example of the ports — the smallest complete host, useful for reading and
+for writing a new one. A fix made here reaches nobody. Make it in ATK, and
+mirror it back only if the example is worth keeping current.
+
 **This file lives outside `writing_workshop/` on purpose.** It knows about
 ATK; the engine must not. A test in the engine's own suite walks the
 package and fails the build if anything under `writing_workshop/**` ever

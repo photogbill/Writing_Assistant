@@ -14,16 +14,17 @@ ceiling on how much of ONE PASS is visible at once — a much lower bar.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from ..types import DEFECT, WARN, Claim, Conflict, Finding, Thread
 from . import chronology, contradictions, namedrift, threads
-from .chronology import Moment, timeline
+from .chronology import Moment, summarise, timeline, transitions
 from .namedrift import Variant
 
 __all__ = ["sweep", "Sweep", "map_sections", "contradictions", "threads",
-           "chronology", "namedrift", "Moment", "Variant", "timeline"]
+           "chronology", "namedrift", "Moment", "Variant", "timeline",
+           "summarise", "transitions"]
 
 
 @dataclass
@@ -33,6 +34,11 @@ class Sweep:
     dropped: list[Thread] = field(default_factory=list)
     variants: list[Variant] = field(default_factory=list)
     moments: list[Moment] = field(default_factory=list)
+    #: `chronology.summarise` of the moments — counts by kind, the
+    #: weekday and date sequences, and the busiest sections. The raw
+    #: `moments` list can run to thousands and is for opening, not
+    #: reading.
+    chronology: dict = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
 
@@ -69,9 +75,34 @@ def map_sections(doc, fn: Callable, *, events=None, cancel=None,
     return out
 
 
+#: How many findings of ONE kind the sweep lists before the rest become a
+#: single note. The comparison still runs in full and the true count is
+#: always stated -- a limit on the LIST, never on the work, and 0 turns it
+#: off. Same reasoning as `craft.MAX_FINDINGS_PER_CHECK`, and the same
+#: measurement behind it.
+MAX_FINDINGS_PER_KIND = 100
+
+
+def _cap(findings: list[Finding], kind: str, label: str,
+         limit: int) -> list[Finding]:
+    mine = [f for f in findings if f.check == kind]
+    if limit <= 0 or len(mine) <= limit:
+        return findings
+    keep = [f for f in findings if f.check != kind]
+    keep.extend(mine[:limit])
+    keep.append(Finding(
+        kind, WARN, f"{len(mine) - limit} more {label} not listed",
+        f"{len(mine)} in all; the first {limit} are shown. The sweep ran "
+        f"in full — this is a limit on the list, not on the work. Pass "
+        f"max_findings=0 to see every one.",
+        data={"total": len(mine), "shown": limit, "capped": True}))
+    return keep
+
+
 def sweep(doc, claims: list[Claim] | None = None, *,
           cast: list[str] | None = None, terms: list[str] | None = None,
-          events=None, cancel=None) -> Sweep:
+          events=None, cancel=None,
+          max_findings: int = MAX_FINDINGS_PER_KIND) -> Sweep:
     """The whole-document continuity pass. No model required.
 
     Everything here is deterministic or explicitly a candidate. A model
@@ -82,7 +113,8 @@ def sweep(doc, claims: list[Claim] | None = None, *,
     result = Sweep()
     if events is not None:
         events.emit("progress", "continuity: comparing claims")
-    result.conflicts = contradictions.find(claims or [])
+    order = {s.id: s.order for s in doc.sections}
+    result.conflicts = contradictions.find(claims or [], order=order)
     for conflict in result.conflicts:
         result.findings.append(_conflict_finding(doc, conflict))
 
@@ -127,6 +159,7 @@ def sweep(doc, claims: list[Claim] | None = None, *,
     if events is not None:
         events.emit("progress", "continuity: chronology")
     result.moments = chronology.timeline(doc)
+    result.chronology = chronology.summarise(result.moments)
     result.metrics = {
         "claims": len(claims or []), "conflicts": len(result.conflicts),
         "deterministic_conflicts": sum(1 for c in result.conflicts
@@ -135,12 +168,44 @@ def sweep(doc, claims: list[Claim] | None = None, *,
         "name_groups": len(result.variants),
         "time_markers": len(result.moments),
         "weekday_runs": len(chronology.weekday_runs(result.moments)),
+        "chronology": result.chronology,
+        "dates_out_of_order": len(chronology.out_of_order(result.moments)),
     }
+    for kind, label in (("contradiction", "contradictions"),
+                        ("dropped_thread", "dropped threads"),
+                        ("name_drift", "name groups")):
+        result.findings = _cap(result.findings, kind, label, max_findings)
     return result
+
+
+def _arc_line(doc, conflict: Conflict) -> str:
+    """“bronze §3–§16, steel from §17” — the contradiction as a timeline.
+
+    One line, and it is the difference between a finding the author can
+    judge and one they can only re-read. A value that holds for a stretch
+    and is then replaced is what a CHANGE looks like; two values
+    interleaved is what a MISTAKE looks like. The tool draws the shape
+    and says nothing about which it is.
+    """
+    if not conflict.arc:
+        return ""
+    total = len(doc.sections)
+    parts = []
+    for i, run in enumerate(conflict.arc):
+        first = doc.sections[min(run["first"], total - 1)] if total else None
+        last = doc.sections[min(run["last"], total - 1)] if total else None
+        where = doc.label(first) if first else ""
+        if last is not None and run["last"] != run["first"]:
+            where += f"–{doc.label(last)}"
+        elif i == len(conflict.arc) - 1 and len(conflict.arc) > 1:
+            where = f"from {where}"
+        parts.append(f"“{run['shown']}” {where}".strip())
+    return ", then ".join(parts)
 
 
 def _conflict_finding(doc, conflict: Conflict) -> Finding:
     a, b = conflict.a, conflict.b
+    line = _arc_line(doc, conflict)
     if conflict.deterministic:
         title = (f"{a.subject}: {a.value} in {a.source_ref}, "
                  f"{b.value} in {b.source_ref}")
@@ -149,9 +214,25 @@ def _conflict_finding(doc, conflict: Conflict) -> Finding:
         title = (f"{a.subject} may be described two ways: “{a.value}” and "
                  f"“{b.value}”")
         severity = WARN
+    detail = conflict.detail
+    count_a, count_b = conflict.mentions
+    if count_a > 1 or count_b > 1:
+        detail += (f"\n\n“{a.value}” is asserted {count_a} time(s), "
+                   f"“{b.value}” {count_b}. One mention against forty is "
+                   f"a different thing from twenty against twenty-one.")
+    if line:
+        detail = (detail + "\n\nIn reading order: " + line + ".").strip()
+        if conflict.sequential:
+            detail += (" One value gives way to the other rather than "
+                       "alternating, which is the shape of a change as "
+                       "much as of a mistake — the tool has no opinion "
+                       "about which.")
     return Finding(
-        "contradiction", severity, title, conflict.detail,
+        "contradiction", severity, title, detail,
         span=a.span, section_id=a.section_id,
         evidence=[q for q in (a.quote, b.quote) if q],
         data={"kind": conflict.kind, "deterministic": conflict.deterministic,
-              "a": a.id, "b": b.id})
+              "a": a.id, "b": b.id, "arc": conflict.arc,
+              "sequential": conflict.sequential,
+              "mentions": list(conflict.mentions),
+              "subject": a.subject})

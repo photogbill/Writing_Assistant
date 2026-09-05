@@ -108,7 +108,7 @@ def gaps(doc, thread: Thread) -> list[tuple[int, int]]:
     """The stretches of the document where a live thread goes quiet."""
     orders = sorted({order for order, _s in thread.mentions})
     out = []
-    for a, b in zip(orders, orders[1:]):
+    for a, b in zip(orders, orders[1:], strict=False):
         if b - a > 1:
             out.append((a, b))
     return out

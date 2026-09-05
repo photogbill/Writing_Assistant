@@ -11,8 +11,15 @@ from __future__ import annotations
 from .. import textio as T
 from ..document import Manuscript
 from ..types import Budget, Candidate, Claim, Section
-from .assembler import (BAND_CLAIMS, BAND_IMMEDIATE, BAND_INVARIANT,
-                        BAND_PRIOR, BAND_SPINE, BAND_SUMMARY, assemble)
+from .assembler import (
+    BAND_CLAIMS,
+    BAND_IMMEDIATE,
+    BAND_INVARIANT,
+    BAND_PRIOR,
+    BAND_SPINE,
+    BAND_SUMMARY,
+    assemble,
+)
 from .budget import DEFAULT_RESERVE, from_model, offline
 from .tokens import TokenCounter, estimate
 
@@ -49,7 +56,7 @@ def build(doc: Manuscript, section: Section | None, *, request: str = "",
           claims: list[Claim] | None = None, budget: Budget | None = None,
           counter: TokenCounter | None = None, llm=None,
           neighbours: int = 1, system: str = "", outline_levels: int = 3,
-          include_prior: bool = True):
+          include_prior: bool = True, retriever=None):
     """Assemble a request. Raises `BandZeroWontFit` rather than degrading.
 
     `section` may be None — an outline pass has no section yet, and the
@@ -113,6 +120,14 @@ def build(doc: Manuscript, section: Section | None, *, request: str = "",
     if include_prior:
         here = section.order if section is not None else 10 ** 6
         taken = {c.key for c in cands}
+        # NEAREST-first, unless the host has a retriever — in which case
+        # RELEVANT-first, which is what an embedder is for and what
+        # `ports.Retriever` was added for. Distance is a decent proxy for
+        # relevance and it is only a proxy: the section that matters most
+        # to chapter 31 is often chapter 7, and no amount of counting
+        # positions will ever find it. A retriever that is absent, empty
+        # or broken costs this and nothing else.
+        relevance = _relevance(doc, section, request, retriever)
         for sec in doc.sections:
             key = f"sec:{sec.id}"
             if key in taken or not sec.words:
@@ -122,10 +137,42 @@ def build(doc: Manuscript, section: Section | None, *, request: str = "",
                 key, BAND_PRIOR,
                 f"### {doc.label(sec)}\n{doc.prose(sec).strip()}",
                 doc.label(sec), stable=True,
-                value=1.0 / distance, summary=summarise(doc, sec)))
+                value=max(1.0 / distance, relevance.get(sec.id, 0.0)),
+                summary=summarise(doc, sec)))
 
     return assemble(cands, budget, request=request, counter=counter,
                     system=system)
+
+
+def _relevance(doc, section, request: str, retriever) -> dict[str, float]:
+    """Section id -> a value multiplier, from the host's retriever.
+
+    Normalised into the same range distance produces (0 to 1), so the two
+    orderings can be compared rather than one swamping the other. A
+    retriever that raises is a retriever that is absent: this is the
+    optional half of band 4 and it must never take the prompt with it.
+    """
+    if retriever is None:
+        return {}
+    query = " ".join(p for p in (request, doc.prose(section)
+                                 if section is not None else "") if p)
+    if not query.strip():
+        return {}
+    try:
+        hits = retriever.query(query, top_k=24) or []
+    except Exception:                                 # noqa: BLE001
+        return {}
+    best = max((float(getattr(h, "score", 0.0)) for h in hits), default=0.0)
+    if best <= 0:
+        return {}
+    out: dict[str, float] = {}
+    for hit in hits:
+        sid = getattr(hit, "section_id", "")
+        if not sid:
+            continue
+        value = float(getattr(hit, "score", 0.0)) / best
+        out[sid] = max(out.get(sid, 0.0), value)
+    return out
 
 
 def meter(budget: Budget, assembly=None) -> list[str]:

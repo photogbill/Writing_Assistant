@@ -197,6 +197,17 @@ class Codex:
         The highest value-per-token material in the whole system: twenty
         claims is about a thousand tokens and it is the difference between
         consistent and not.
+
+        **This is the store-only version and it is the weaker one.** It
+        knows which section a claim was READ FROM, which is not the same
+        question as which section a claim CONSTRAINS, and it takes the
+        whole cast as `subjects` so every claim about anybody scores the
+        same whether the passage mentions them or not.
+        `writing_workshop.codex.select.governing` has the manuscript and
+        can ask the real question — does this passage name the subject —
+        and can use a retriever for the claims a passage is about without
+        naming. Prefer it wherever a `Manuscript` is in hand; this stays
+        for callers that have only the store.
         """
         rows = self.all(state=ACCEPTED)
         wanted = {s.lower() for s in (subjects or [])}
@@ -217,8 +228,7 @@ class Codex:
     def counts(self) -> dict:
         rows = self.db.execute(
             "SELECT state, COUNT(*) n FROM claims GROUP BY state")
-        out = {state: 0 for state in (PROPOSED, ACCEPTED, REJECTED,
-                                      SUPERSEDED)}
+        out = dict.fromkeys((PROPOSED, ACCEPTED, REJECTED, SUPERSEDED), 0)
         for row in rows:
             out[row["state"]] = row["n"]
         return out

@@ -50,7 +50,13 @@ SEVERITIES = (NOTE, WARN, DEFECT)
 
 TECHNICAL = "technical"
 FICTION = "fiction"
-DOC_TYPES = (TECHNICAL, FICTION)
+#: Lyrics, libretto, hymn, any text meant to be SUNG. Not a sub-case of
+#: fiction: the measurements that matter are syllables per line, whether a
+#: refrain says the same thing every time, and where a rhyme scheme
+#: breaks — none of which any prose check asks about, while several prose
+#: checks are actively wrong here (a chorus is supposed to repeat).
+LYRICS = "lyrics"
+DOC_TYPES = (TECHNICAL, FICTION, LYRICS)
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,7 @@ class Span:
     def __len__(self) -> int:
         return max(0, self.end - self.start)
 
-    def overlaps(self, other: "Span") -> bool:
+    def overlaps(self, other: Span) -> bool:
         return (self.path == other.path
                 and self.start < other.end and other.start < self.end)
 
@@ -128,6 +134,12 @@ class Finding:
     section_id: str = ""
     evidence: list[str] = field(default_factory=list)
     data: dict[str, Any] = field(default_factory=dict)
+    #: A stable content identity, filled in by `findings.stamp` and never
+    #: by a check. It is what lets an author dismiss a finding once and
+    #: what lets the next run say which findings are NEW — deliberately
+    #: derived from what the finding is about rather than from where it
+    #: is, so a paragraph that moves is not a finding that returns.
+    key: str = ""
 
     @property
     def is_problem(self) -> bool:
@@ -148,6 +160,10 @@ class CraftReport:
     findings: list[Finding] = field(default_factory=list)
     ran: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
+    #: Seconds per check. Not decoration: a pass on an offloaded machine
+    #: is meant to be slow, so the operator needs to see WHERE the time
+    #: went rather than guess whether it has hung.
+    timing: dict[str, float] = field(default_factory=dict)
 
     def problems(self) -> list[Finding]:
         return [f for f in self.findings if f.is_problem]
@@ -155,11 +171,12 @@ class CraftReport:
     def by_check(self, check: str) -> list[Finding]:
         return [f for f in self.findings if f.check == check]
 
-    def merge(self, other: "CraftReport") -> None:
+    def merge(self, other: CraftReport) -> None:
         self.metrics.update(other.metrics)
         self.findings.extend(other.findings)
         self.ran.extend(other.ran)
         self.skipped.update(other.skipped)
+        self.timing.update(other.timing)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +244,34 @@ class Conflict:
     kind: str
     deterministic: bool
     detail: str = ""
+    #: Reading order of each side, and the whole run of values for this
+    #: subject in order. WITHOUT IT a novel punishes its own plot: a
+    #: character who cuts their hair in chapter 20 disagrees with chapter
+    #: 3 for ever, and the only remedy is supersession — which is an act
+    #: about a fact that changed for the AUTHOR, not one that changed in
+    #: the story. With it the finding reads "bronze §3–§16, steel from
+    #: §17", and the author can see in one look which of the two it is.
+    a_order: int = 0
+    b_order: int = 0
+    arc: list = field(default_factory=list)
+    #: How many claims carried each side's value. A conflict between one
+    #: mention and forty is a different thing from a conflict between
+    #: twenty and twenty-one, and the author can see which in one glance.
+    mentions: tuple[int, int] = (1, 1)
 
     @property
     def severity(self) -> str:
         return DEFECT if self.deterministic else WARN
+
+    @property
+    def sequential(self) -> bool:
+        """Do the two values sit in DIFFERENT stretches of the document?
+
+        True is the shape of a change; false is the shape of a mistake.
+        Reported, never acted on — the tool does not know whether the
+        author meant it.
+        """
+        return len(self.arc) > 1 and self.a_order != self.b_order
 
 
 @dataclass

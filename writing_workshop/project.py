@@ -19,12 +19,74 @@ import json
 from pathlib import Path
 import re
 
+from . import doctypes as DT
+from . import rules as R
+from . import state as ST
 from .document import Manuscript
 from .errors import ProjectError
 from .types import FICTION, TECHNICAL
 
 WORKSHOP_DIR = ".workshop"
 PROJECT_FILE = "project.json"
+
+#: How far up from the project root to look for a `house.json`. Four is
+#: `books/fantasy/the-bronze-sword/` plus a shelf above it, and stopping
+#: is the point: a search that walks to the filesystem root eventually
+#: finds somebody else's house file and applies it silently.
+HOUSE_DEPTH = 4
+
+DEFAULT_LANGUAGE = "en"
+
+
+@dataclass
+class House:
+    """Style shared by every project on a shelf.
+
+    An author with twelve manuals under one house style keeps twelve
+    copies of it, and twelve copies drift — which is the defect
+    `terminology` exists to find, one level up. So the style card, the
+    rules, the terms and the craft settings may live once, above the
+    projects, and a project inherits them.
+
+    **Inherited, never copied in.** The house values are held separately
+    and merged on read, so `project.json` never acquires a snapshot of
+    them: change the house file and every project follows, which is the
+    whole reason to have one.
+    """
+
+    path: Path | None = None
+    name: str = ""
+    style_card: str = ""
+    document_rules: str = ""
+    terms: list[str] = field(default_factory=list)
+    glossary_titles: list[str] = field(default_factory=list)
+    settings: dict = field(default_factory=dict)
+    rules: list = field(default_factory=list)
+
+    @property
+    def found(self) -> bool:
+        return self.path is not None
+
+    @classmethod
+    def load(cls, root: Path) -> House:
+        """The nearest `house.json` at or above `root`, if there is one."""
+        here = Path(root).resolve()
+        for parent in [here, *list(here.parents)[:HOUSE_DEPTH]]:
+            candidate = parent / ST.HOUSE
+            if candidate.exists():
+                store = ST.Store(parent)
+                data = store.read(ST.HOUSE, {})
+                if not isinstance(data, dict):
+                    continue
+                return cls(
+                    path=candidate, name=str(data.get("name") or ""),
+                    style_card=str(data.get("style_card") or ""),
+                    document_rules=str(data.get("document_rules") or ""),
+                    terms=list(data.get("terms") or []),
+                    glossary_titles=list(data.get("glossary_titles") or []),
+                    settings=dict(data.get("settings") or {}),
+                    rules=R.parse(data.get("rules"), source="house"))
+        return cls()
 
 
 def _slug(name: str) -> str:
@@ -67,6 +129,20 @@ class Project:
                                  "acronyms", "nomenclature"])
     targets: Targets = field(default_factory=Targets)
     settings: dict = field(default_factory=dict)
+    #: What language this manuscript is WRITTEN in, as an ISO code.
+    #:
+    #: It exists because almost every measurement in this package is
+    #: English — the common-word list, the syllable heuristic, the filter
+    #: words, the subordinators, the `-ly` adverb rule, the participle
+    #: list, Flesch-Kincaid — and until now nothing recorded that or
+    #: refused. Point a German manuscript at it and every check ran and
+    #: every answer was confidently wrong: no word is "common", so every
+    #: sentence is an echo and the rarity score is 1.0. That is rule 3
+    #: inverted, in the one place the degradation cannot be seen from the
+    #: output. Now a check declares the languages it is valid for and the
+    #: rest are skipped WITH A REASON.
+    language: str = DEFAULT_LANGUAGE
+    _house: House | None = field(default=None, repr=False)
 
     # -- paths ------------------------------------------------------------
 
@@ -96,7 +172,7 @@ class Project:
     # -- lifecycle --------------------------------------------------------
 
     @classmethod
-    def open(cls, root: str | Path, create: bool = True) -> "Project":
+    def open(cls, root: str | Path, create: bool = True) -> Project:
         root = Path(root)
         if not root.exists():
             if not create:
@@ -114,9 +190,8 @@ class Project:
 
     def _apply(self, data: dict) -> None:
         self.name = data.get("name") or self.root.name
-        self.document_type = (data.get("document_type") or TECHNICAL)
-        if self.document_type not in (TECHNICAL, FICTION):
-            self.document_type = TECHNICAL
+        self.document_type = str(
+            data.get("document_type") or TECHNICAL).strip().lower()
         self.style_card = data.get("style_card", "")
         self.document_rules = data.get("document_rules", "")
         self.cast = list(data.get("cast") or [])
@@ -125,6 +200,9 @@ class Project:
             self.glossary_titles = list(data["glossary_titles"])
         self.targets = Targets(**(data.get("targets") or {}))
         self.settings = dict(data.get("settings") or {})
+        self.language = str(data.get("language")
+                            or DEFAULT_LANGUAGE).strip().lower() or \
+            DEFAULT_LANGUAGE
 
     def save(self) -> Path:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +213,7 @@ class Project:
             "document_rules": self.document_rules,
             "cast": self.cast, "terms": self.terms,
             "glossary_titles": self.glossary_titles,
+            "language": self.language,
             "targets": asdict(self.targets), "settings": self.settings,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
@@ -157,13 +236,83 @@ class Project:
     def is_fiction(self) -> bool:
         return self.document_type == FICTION
 
+    # -- the workshop's own side files ------------------------------------
+
+    @property
+    def store(self) -> ST.Store:
+        """Where dismissals, the last run and influence spans live."""
+        return ST.Store(self.dir)
+
+    @property
+    def house(self) -> House:
+        if self._house is None:
+            self._house = House.load(self.root)
+        return self._house
+
+    # -- what a caller should actually pass to the checks -----------------
+    #
+    # Every one of these is "the house, then this project on top". They
+    # exist because the alternative -- copying the house values into
+    # `project.json` at open time -- makes the house file a template
+    # rather than a source, and the twelve copies drift again.
+
+    def effective_style_card(self) -> str:
+        parts = [p for p in (self.house.style_card.strip(),
+                             self.style_card.strip()) if p]
+        return "\n\n".join(parts)
+
+    def effective_document_rules(self) -> str:
+        parts = [p for p in (self.house.document_rules.strip(),
+                             self.document_rules.strip()) if p]
+        return "\n\n".join(parts)
+
+    def effective_terms(self) -> list[str]:
+        return list(dict.fromkeys([*self.house.terms, *self.terms]))
+
+    def effective_glossary_titles(self) -> list[str]:
+        return list(dict.fromkeys(
+            [*self.house.glossary_titles, *self.glossary_titles]))
+
+    def craft_options(self) -> dict:
+        """Thresholds for the craft checks — house first, project over it.
+
+        `Ctx.opt` has always read these and `craft.run` has always
+        accepted them; until this existed nothing passed them, so
+        `echo_window`, `target_grade`, `step_words_warn` and five others
+        were reachable in code and unreachable in practice. A threshold
+        nobody can set is a complaint rather than a setting.
+        """
+        merged = dict(self.house.settings.get("craft") or {})
+        merged.update(self.settings.get("craft") or {})
+        return merged
+
+    def doctypes(self) -> dict:
+        """Every document type this project may use."""
+        return DT.load(self.store, self.house.settings.get("doctypes"))
+
+    def profile(self):
+        """The profile for THIS project's document type. Never None."""
+        return DT.get(self.document_type, self.doctypes())
+
+    def rules(self) -> list:
+        """The project's own craft rules, with the house's underneath."""
+        mine = R.parse(self.store.read(ST.RULES, None), source="project")
+        return R.merge(self.house.rules, mine)
+
+    def write_example_rules(self) -> Path:
+        """Put a starter rules file in place, if there is not one."""
+        if self.store.exists(ST.RULES):
+            return self.store.path(ST.RULES)
+        return self.store.write(ST.RULES, {"rules": R.example()})
+
     def invariant(self) -> list[tuple[str, str]]:
         """Band 0 material, as (reason, text) pairs."""
         out = []
-        if self.style_card.strip():
-            out.append(("style card", self.style_card.strip()))
-        if self.document_rules.strip():
-            out.append(("document rules", self.document_rules.strip()))
+        if self.effective_style_card().strip():
+            out.append(("style card", self.effective_style_card().strip()))
+        if self.effective_document_rules().strip():
+            out.append(("document rules",
+                        self.effective_document_rules().strip()))
         return out
 
     # -- ritual -----------------------------------------------------------

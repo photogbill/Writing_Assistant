@@ -15,9 +15,9 @@ from dataclasses import dataclass
 import re
 
 from .. import textio as T
-from ..units import NUM_UNIT, QUANTITY_WORDS, conflict, dimension
 from ..types import DEFECT, NOTE, TECHNICAL, WARN, CraftReport, Finding, Span
-from . import Ctx, check
+from ..units import NUM_UNIT, QUANTITY_WORDS, conflict, dimension
+from . import ANY_LANGUAGE, Ctx, check
 
 # ---------------------------------------------------------------------------
 # terminology drift
@@ -282,7 +282,8 @@ def _label(ctx: Ctx, span: Span) -> str:
     return ctx.doc.label(sec) if sec else span.path
 
 
-@check("acronyms", "Acronym first-use expansion", TECHNICAL)
+@check("acronyms", "Acronym first-use expansion", TECHNICAL,
+       languages=ANY_LANGUAGE)
 def acronyms(ctx: Ctx) -> CraftReport:
     """Every acronym expanded on first appearance, and only the first.
 
@@ -374,10 +375,12 @@ def _initials_match(text: str, letters: list[str]) -> bool:
     if len(words) < len(letters):
         return False
     tail = words[-len(letters):]
-    if all(w[:1].upper() == c.upper() for w, c in zip(tail, letters)):
+    if all(w[:1].upper() == c.upper() for w, c in zip(tail, letters,
+                                                strict=False)):
         return True
     head = words[:len(letters)]
-    return all(w[:1].upper() == c.upper() for w, c in zip(head, letters))
+    return all(w[:1].upper() == c.upper() for w, c in zip(head, letters,
+                                                strict=False))
 
 
 # ---------------------------------------------------------------------------
@@ -494,9 +497,19 @@ def xrefs(ctx: Ctx) -> CraftReport:
 # ---------------------------------------------------------------------------
 
 
-def _procedures(ctx: Ctx):
-    """Contiguous runs of ordered-list items, or of `Step N` paragraphs."""
+def _procedures(ctx: Ctx, numbering_matters: bool = False):
+    """Contiguous runs of ordered-list items, or of `Step N` paragraphs.
+
+    `numbering_matters` excludes DERIVED files. A `.docx` stores no list
+    numbers — Word's renderer supplies them — so the whole premise of the
+    step-numbering check ("the source is the truth here, not the render")
+    is false there, and running it would report gaps this package
+    invented while reading the file. Length inside a step is still real,
+    so `long_steps` asks for everything.
+    """
     for src in ctx.doc.files:
+        if numbering_matters and src.derived:
+            continue
         run: list[T.Block] = []
         for block in src.blocks:
             number = 0
@@ -515,7 +528,8 @@ def _procedures(ctx: Ctx):
             yield src, run
 
 
-@check("steps", "Step numbering integrity", TECHNICAL)
+@check("steps", "Step numbering integrity", TECHNICAL,
+       languages=ANY_LANGUAGE)
 def steps(ctx: Ctx) -> CraftReport:
     """Gaps, duplicates and restarts in a numbered procedure.
 
@@ -526,7 +540,10 @@ def steps(ctx: Ctx) -> CraftReport:
     """
     rep = CraftReport()
     procedures = 0
-    for src, run in _procedures(ctx):
+    skipped = [s.rel for s in ctx.doc.derived_files]
+    if skipped:
+        rep.metrics["steps_not_checked"] = skipped
+    for src, run in _procedures(ctx, numbering_matters=True):
         if len(run) < 3:
             continue
         procedures += 1
@@ -559,7 +576,8 @@ def steps(ctx: Ctx) -> CraftReport:
     return rep
 
 
-@check("long_steps", "Long instructions", TECHNICAL)
+@check("long_steps", "Long instructions", TECHNICAL,
+       languages=ANY_LANGUAGE)
 def long_steps(ctx: Ctx) -> CraftReport:
     """Sentence length INSIDE a numbered step, not sentence length
     generally.
