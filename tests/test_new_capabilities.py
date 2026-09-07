@@ -196,6 +196,138 @@ class DocumentTypes(TempProject):                     # noqa: F405
         self.assertEqual(table, {})
 
 
+class SettingsCanBeWrittenBack(TempProject):
+    """A settings editor that cannot read its own output eats the author's
+    rules the second time they open it. So: round-trips, all three files.
+
+    Bill, 2026-09-06: *"go ahead and finish the field table."* These were
+    the last three things this package could express and nothing could
+    reach — the declarative rules, the eleven thresholds and the
+    document-type profiles, all of them hand-edited JSON until now.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.project = Project.open(self.root)
+
+    # -- rules ------------------------------------------------------------
+
+    def test_rules_round_trip_through_the_file(self):
+        first = R.parse(R.example())
+        self.project.write_rules(first)
+        back = Project.open(self.root).project_rules()
+        self.assertEqual([r.id for r in back], [r.id for r in first])
+        for a, b in zip(first, back):
+            for field in ("message", "phrase", "pattern", "severity",
+                          "scope", "files", "hint", "ignorecase",
+                          "whole_word", "enabled"):
+                self.assertEqual(getattr(a, field), getattr(b, field),
+                                 f"{a.id}.{field}")
+
+    def test_a_rule_at_its_defaults_is_not_written_out(self):
+        """A rules file an author opens should be the decisions they made,
+        not eleven fields of boilerplate per rule."""
+        written = R.to_json(R.parse([{"id": "x", "phrase": "simply"}]))
+        self.assertEqual(set(written["rules"][0]), {"id", "phrase"})
+
+    def test_what_a_rule_carries_into_the_file_is_only_what_was_typed(self):
+        """`source` is where the rule was READ from, and `error` and
+        `regex` are what compiling produced. Writing any of them would make
+        an inherited rule a copy or a compiled artefact a setting."""
+        for absent in ("source", "error", "regex"):
+            self.assertNotIn(absent, R.WRITTEN)
+
+    def test_a_broken_rule_survives_the_round_trip_and_still_reports(self):
+        """A rule the author typed wrongly has to be able to tell them so.
+        Dropping it on save would make the message disappear along with the
+        rule, and they would believe it was running."""
+        broken = R.parse([{"id": "bad", "pattern": "(unclosed"}])
+        self.assertTrue(broken[0].error)
+        self.project.write_rules(broken)
+        back = Project.open(self.root).project_rules()
+        self.assertEqual(back[0].id, "bad")
+        self.assertTrue(back[0].error)
+
+    def test_a_house_rule_is_refused_rather_than_copied_in(self):
+        """`House` is inherited and never copied in — that is the whole
+        reason a shelf can change its mind once and have twelve manuals
+        follow. And the refusal names the override path rather than just
+        saying no."""
+        house = R.parse([{"id": "h", "phrase": "x"}], source="house")
+        with self.assertRaises(ValueError) as caught:
+            self.project.write_rules(house)
+        self.assertIn("override", str(caught.exception))
+
+    def test_a_house_rule_copied_as_the_projects_own_is_accepted(self):
+        """The designed way for one project to disagree: same id, marked
+        as the project's, and `merge` lets it win here and nowhere else."""
+        raw = R.to_json(R.parse([{"id": "h", "phrase": "x"}]))["rules"][0]
+        raw["phrase"] = "y"
+        mine = R.compile_one(raw, source="project")
+        self.project.write_rules([mine])
+        merged = R.merge(R.parse([{"id": "h", "phrase": "x"}],
+                                 source="house"),
+                         Project.open(self.root).project_rules())
+        self.assertEqual([r.phrase for r in merged], ["y"])
+
+    # -- thresholds -------------------------------------------------------
+
+    def test_thresholds_reach_the_checks(self):
+        self.project.set_craft_options({"echo_window": 90})
+        self.assertEqual(Project.open(self.root).craft_options(),
+                         {"echo_window": 90})
+
+    def test_a_threshold_equal_to_the_house_is_not_written(self):
+        """`craft_options` merges house-then-project, so a project that
+        restates the house's number keeps working only until the house
+        changes its mind — at which point it silently does not follow."""
+        (self.root / "house.json").write_text(
+            json.dumps({"settings": {"craft": {"echo_window": 90}}}),
+            encoding="utf-8")
+        project = Project.open(self.root)
+        project.set_craft_options({"echo_window": 90, "opener_run": 4})
+        self.assertEqual(project.settings.get("craft"), {"opener_run": 4})
+        self.assertEqual(Project.open(self.root).craft_options(),
+                         {"echo_window": 90, "opener_run": 4})
+
+    def test_clearing_every_threshold_removes_the_block(self):
+        self.project.set_craft_options({"echo_window": 90})
+        self.project.set_craft_options({})
+        self.assertNotIn("craft", Project.open(self.root).settings)
+
+    # -- document types ---------------------------------------------------
+
+    def test_doctypes_round_trip(self):
+        made = DT.parse([{"key": "screenplay", "label": "Screenplay",
+                          "base": "fiction", "drop": ["readability"],
+                          "add": ["dialogue"], "blurb": "Scripts."}])
+        self.project.write_doctypes(list(made.values()))
+        back = Project.open(self.root).doctypes()["screenplay"]
+        self.assertEqual(back.base, "fiction")
+        self.assertEqual(tuple(back.drop), ("readability",))
+        self.assertEqual(tuple(back.add), ("dialogue",))
+        self.assertEqual(back.label, "Screenplay")
+
+    def test_the_built_ins_are_never_written_out(self):
+        """`parse` refuses a key that shadows one and `load` puts them in
+        first, so writing them would produce a file of three entries that
+        are ignored on the next read — a file that lies about what it
+        controls."""
+        self.assertEqual(DT.to_json(list(DT.BUILTIN.values())),
+                         {"doctypes": []})
+        self.project.write_doctypes(list(DT.BUILTIN.values()))
+        written = json.loads(
+            (self.root / ".workshop" / "doctypes.json").read_text(
+                encoding="utf-8"))
+        self.assertEqual(written["doctypes"], [])
+
+    def test_one_spelling_of_each_file_name(self):
+        """`state` says nothing else spells a file name; `doctypes` used
+        to spell its own, so a rename could half-happen."""
+        from writing_workshop import state as ST
+        self.assertEqual(DT.DOCTYPES_FILE, ST.DOCTYPES)
+
+
 class Lyrics(unittest.TestCase):
     SONG = """# Song
 

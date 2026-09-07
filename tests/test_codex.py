@@ -6,8 +6,12 @@ from __future__ import annotations
 import unittest
 
 from _base import MANUAL, NOVEL, TempProject
+from pathlib import Path
+
 from writing_workshop import (ACCEPTED, Manuscript, NUMERIC, PROPOSED,
-                              Project, SUPERSEDED)
+                              Project, REJECTED, SUPERSEDED)
+
+ROOT = Path(__file__).resolve().parents[1]
 from writing_workshop import codex as CX
 from writing_workshop.ports import FixedClock
 
@@ -196,6 +200,263 @@ class ModelProposals(unittest.TestCase):
         from writing_workshop.ports import Host
         with self.assertRaises(NoModelError):
             CX.propose(Host(), self.doc, self.section)
+
+
+class TheAuthorsOwnHand(TempProject):
+    """Three verbs, because the three things an author might mean when
+    they say "this claim is wrong" are genuinely different.
+
+    Bill, 2026-09-06: *"everything should be editable, both the inputs and
+    the outputs."* A ledger is the case where taking that literally would
+    destroy the thing being edited — so the edit is offered and the record
+    of what happened is kept, which is the whole point of a ledger.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.project = Project.open(self.root)
+        self.codex = CX.Codex(self.project.codex_db,
+                              clock=FixedClock("2026-09-06 12:00:00"))
+
+    def tearDown(self):
+        self.codex.close()
+        super().tearDown()
+
+    # -- author -----------------------------------------------------------
+
+    def test_an_authored_claim_is_the_authors_and_says_so(self):
+        claim = self.codex.author(CX.make("Mara", "material", "bronze"))
+        self.assertEqual(claim.origin, "author")
+        self.assertEqual(claim.state, PROPOSED)
+
+    def test_accepting_as_you_write_is_still_two_acts_in_the_journal(self):
+        """The rule that no constructor can make an accepted claim is not
+        a formality to be routed around by the one path that finds it
+        inconvenient. It is what makes `accepted` mean an act somebody
+        took, and the journal has to show the act."""
+        claim = self.codex.author(CX.make("Mara", "material", "bronze"),
+                                  accept=True)
+        self.assertEqual(claim.state, ACCEPTED)
+        self.assertEqual([a for a, _at, _d in self.codex.history(claim.id)],
+                         ["proposed", "accepted"])
+
+    def test_an_authored_claim_reaches_the_places_accepted_claims_reach(self):
+        claim = self.codex.author(
+            CX.make("Mara", "material", "bronze"), accept=True)
+        self.assertIn(claim.id,
+                      [c.id for c in self.codex.all(state=ACCEPTED)])
+
+    # -- revise -----------------------------------------------------------
+
+    def test_a_proposed_claim_can_be_fixed_in_place(self):
+        """Nothing can depend on a proposed claim: it is never mirrored,
+        never returned by `governing`, and nothing links to it."""
+        claim = self.codex.add(CX.make("Sword", "material", "bronz"))
+        fixed = self.codex.revise(claim.id, value="bronze",
+                                  subject="Sword of Ys")
+        self.assertEqual(fixed.id, claim.id)
+        self.assertEqual(self.codex.get(claim.id).value, "bronze")
+        self.assertEqual(self.codex.get(claim.id).subject, "Sword of Ys")
+
+    def test_revising_rebuilds_the_parsed_number(self):
+        """The value carries a number and a unit that were PARSED out of
+        it. A revision that wrote the text and kept the old figure would
+        leave every numeric check comparing 40 against a claim that reads
+        45 for ever — which is the bug this rebuild exists to prevent."""
+        claim = self.codex.add(CX.make("torque", "value", "40 Nm",
+                                       kind=NUMERIC))
+        self.assertEqual(claim.number, 40.0)
+        fixed = self.codex.revise(claim.id, value="45 Nm")
+        self.assertEqual(fixed.number, 45.0)
+        self.assertEqual(self.codex.get(claim.id).number, 45.0)
+
+    def test_revising_rebuilds_the_conflict_key(self):
+        claim = self.codex.add(CX.make("Sword", "material", "bronze"))
+        fixed = self.codex.revise(claim.id, subject="Dagger")
+        self.assertEqual(fixed.key, "dagger|material")
+        self.assertEqual([c.id for c in self.codex.by_key("dagger|material")],
+                         [claim.id])
+        self.assertEqual(self.codex.by_key("sword|material"), [])
+
+    def test_a_revision_is_journalled_with_what_it_was(self):
+        claim = self.codex.add(CX.make("Sword", "material", "bronz"))
+        self.codex.revise(claim.id, value="bronze")
+        actions = [a for a, _at, _d in self.codex.history(claim.id)]
+        self.assertIn("revised", actions)
+        detail = [d for a, _at, d in self.codex.history(claim.id)
+                  if a == "revised"][0]
+        self.assertIn("bronz", detail)
+
+    def test_an_accepted_claim_cannot_be_edited_in_place(self):
+        claim = self.codex.add(CX.make("Sword", "material", "bronze"))
+        self.codex.accept(claim.id)
+        with self.assertRaises(ValueError) as caught:
+            self.codex.revise(claim.id, value="steel")
+        self.assertIn("corrected, not", str(caught.exception))
+
+    # -- correct ----------------------------------------------------------
+
+    def test_a_correction_rejects_the_wrong_claim_and_links_the_right_one(self):
+        wrong = self.codex.add(CX.make("Sword", "material", "bronze"))
+        self.codex.accept(wrong.id)
+        right = self.codex.correct(wrong.id,
+                                   CX.make("Sword", "colour", "bronze"))
+        old = self.codex.get(wrong.id)
+        self.assertEqual(old.state, REJECTED)
+        self.assertEqual(old.replaced_by, right.id)
+        self.assertEqual(right.state, ACCEPTED)
+
+    def test_a_correction_is_not_a_supersession(self):
+        """THE DISTINCTION THIS VERB EXISTS FOR. `supersede` says the world
+        moved and both values were true in their turn, which is what lets
+        `reconsider` find the four passages still saying bronze. A
+        correction says the claim never should have said that — recording
+        it as a supersession would send `reconsider` hunting the
+        manuscript for a value the manuscript never contained.
+        """
+        wrong = self.codex.add(CX.make("Sword", "material", "brnze"))
+        self.codex.accept(wrong.id)
+        self.codex.correct(wrong.id, CX.make("Sword", "material", "bronze"))
+        old = self.codex.get(wrong.id)
+        self.assertNotEqual(old.state, SUPERSEDED)
+        self.assertEqual(old.superseded_by, 0)
+        self.assertEqual(self.codex.all(state=SUPERSEDED), [])
+
+    def test_a_correction_inherits_the_evidence_it_did_not_change(self):
+        """A correction changes the READING of a passage, never the
+        passage. An author who could retype a quote could change what the
+        document is recorded as saying, which is the one edit this store
+        must not offer."""
+        wrong = CX.make("Sword", "material", "bronze",
+                        source_ref="ch 3 · para 2", section_id="s1",
+                        quote="the bronze sword lay there")
+        wrong = self.codex.add(wrong)
+        self.codex.accept(wrong.id)
+        right = self.codex.correct(wrong.id,
+                                   CX.make("Sword", "colour", "bronze"))
+        self.assertEqual(right.quote, "the bronze sword lay there")
+        self.assertEqual(right.source_ref, "ch 3 · para 2")
+        self.assertEqual(right.section_id, "s1")
+
+    def test_a_correction_says_what_it_replaced(self):
+        wrong = self.codex.add(CX.make("Sword", "material", "bronze"))
+        self.codex.accept(wrong.id)
+        self.codex.correct(wrong.id, CX.make("Dagger", "material", "bronze"))
+        detail = [d for a, _at, d in self.codex.history(wrong.id)
+                  if a == "corrected"][0]
+        self.assertIn("Sword", detail)
+        self.assertIn("bronze", detail)
+
+    def test_correcting_a_proposed_claim_leaves_it_proposed(self):
+        """Nothing has been agreed to yet, so nothing is asserted by
+        fixing it."""
+        wrong = self.codex.add(CX.make("Sword", "material", "bronze"))
+        right = self.codex.correct(wrong.id,
+                                   CX.make("Sword", "colour", "bronze"))
+        self.assertEqual(right.state, PROPOSED)
+        self.assertEqual(self.codex.get(wrong.id).state, REJECTED)
+
+    def test_nothing_is_ever_deleted(self):
+        wrong = self.codex.add(CX.make("Sword", "material", "bronze"))
+        self.codex.accept(wrong.id)
+        self.codex.correct(wrong.id, CX.make("Sword", "colour", "bronze"))
+        self.assertEqual(len(self.codex.all()), 2)
+
+
+class AnOlderCodexStillOpens(TempProject):
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+    exists, so a schema that grows needs a migration or every Codex written
+    before today raises `no such column` on the first read — a failure that
+    looks like a corrupt project folder and is not.
+    """
+
+    #: The schema exactly as it shipped, without `replaced_by`.
+    OLD = """
+    CREATE TABLE claims (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL,
+        kind TEXT NOT NULL, predicate TEXT NOT NULL, value TEXT NOT NULL,
+        unit TEXT DEFAULT '', number REAL, source_ref TEXT DEFAULT '',
+        section_id TEXT DEFAULT '', path TEXT DEFAULT '',
+        span_start INTEGER DEFAULT 0, span_end INTEGER DEFAULT 0,
+        quote TEXT DEFAULT '', state TEXT NOT NULL DEFAULT 'proposed',
+        origin TEXT DEFAULT 'author', superseded_by INTEGER DEFAULT 0,
+        note TEXT DEFAULT '', key TEXT DEFAULT '', created TEXT DEFAULT '');
+    CREATE TABLE journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, claim_id INTEGER NOT NULL,
+        action TEXT NOT NULL, at TEXT DEFAULT '', detail TEXT DEFAULT '');
+    INSERT INTO claims (subject,kind,predicate,value,state,key)
+    VALUES ('Sword','attribute','material','bronze','accepted',
+            'sword|material');
+    """
+
+    def _old_db(self):
+        import sqlite3
+        path = self.root / "old-codex.db"
+        db = sqlite3.connect(str(path))
+        db.executescript(self.OLD)
+        db.commit()
+        db.close()
+        return path
+
+    def test_it_opens_and_reads(self):
+        store = CX.Codex(self._old_db())
+        try:
+            claim = store.all()[0]
+            self.assertEqual(claim.value, "bronze")
+            self.assertEqual(claim.replaced_by, 0)
+        finally:
+            store.close()
+
+    def test_and_the_new_verb_works_on_it(self):
+        store = CX.Codex(self._old_db())
+        try:
+            old = store.all()[0]
+            right = store.correct(old.id, CX.make("Sword", "colour",
+                                                  "bronze"))
+            self.assertEqual(store.get(old.id).replaced_by, right.id)
+        finally:
+            store.close()
+
+    def test_the_migration_is_additive_only(self):
+        """A migration that can lose an author's Codex is worse than a
+        feature that has to wait.
+
+        On the SQL it EXECUTES, not on the source text: the first version
+        of this test read the whole function including its docstring and
+        failed on the word "dropped" in the sentence promising nothing is
+        dropped. A guard that fires on its own documentation teaches
+        people to weaken the guard.
+        """
+        import ast
+        import re
+        source = (ROOT / "writing_workshop" / "codex" / "store.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(source)
+        migrate = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "_migrate")
+        statements = []
+        for node in ast.walk(migrate):
+            #: Only the strings handed to `execute`, and only those — the
+            #: docstring is a string in this function too.
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "execute"):
+                continue
+            for arg in node.args:
+                statements.append(ast.unparse(arg).upper())
+        self.assertTrue(statements, "the migration executes no SQL at all")
+        for sql in statements:
+            for forbidden in ("DROP", "DELETE", "RENAME", "UPDATE",
+                              "INSERT"):
+                self.assertIsNone(
+                    re.search(rf"\b{forbidden}\b", sql),
+                    f"the migration runs {forbidden}: {sql}")
+            self.assertTrue(
+                sql.startswith("'PRAGMA") or sql.startswith('"PRAGMA')
+                or "ADD COLUMN" in sql or sql.startswith("F'ALTER")
+                or sql.startswith('F"ALTER'),
+                f"unexpected migration statement: {sql}")
 
 
 if __name__ == "__main__":
