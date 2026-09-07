@@ -39,8 +39,13 @@ from .ports import (Cancel, CollectingEvents, Host, KeywordRetriever,
                     ModelInfo, NoLedger, NoSpeech, NullLLM, Retrieved,
                     SilentEvents, Voice)
 from .project import House, Project
-from .types import (ACCEPTED, ATTRIBUTE, DEFECT, FICTION, LYRICS, NOTE,
-                    NUMERIC, PROPOSED, RELATIONSHIP, SUPERSEDED, TECHNICAL,
+#: REJECTED was the one claim state this list left out, which meant a host
+#: that wanted to show rejected claims had to reach past the package root
+#: for a constant its three siblings were exported by. Four states or none.
+from .types import (ACCEPTED, ATTRIBUTE, CLAIM_KINDS, DEFECT, FICTION,
+                    LYRICS, NOTE,
+                    NUMERIC, PROPOSED, REJECTED, RELATIONSHIP, SUPERSEDED,
+                    TECHNICAL,
                     TEMPORAL, WARN, Assembly, Budget, Candidate, Claim,
                     Conflict, CraftReport, Drift, Finding, Fingerprint,
                     Hunk, Paragraph, Section, Span, Suggestion, Thread,
@@ -56,6 +61,7 @@ __all__ = [
     "CraftReport", "Claim", "Conflict", "Thread", "Candidate", "Assembly",
     "Budget", "Fingerprint", "Drift", "Suggestion", "Hunk", "VersionInfo",
     "NOTE", "WARN", "DEFECT", "TECHNICAL", "FICTION", "LYRICS",
-    "ATTRIBUTE", "RELATIONSHIP", "TEMPORAL", "NUMERIC", "PROPOSED",
-    "ACCEPTED", "SUPERSEDED",
+    "ATTRIBUTE", "RELATIONSHIP", "TEMPORAL", "NUMERIC", "CLAIM_KINDS",
+    "PROPOSED",
+    "ACCEPTED", "REJECTED", "SUPERSEDED",
 ]

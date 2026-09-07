@@ -299,6 +299,64 @@ class Project:
         mine = R.parse(self.store.read(ST.RULES, None), source="project")
         return R.merge(self.house.rules, mine)
 
+    def project_rules(self) -> list:
+        """This project's OWN rules, without the house's underneath.
+
+        `rules()` merges for the checks, which is what they want. An editor
+        wants the two apart: the house's are not this project's to change,
+        and showing them as if they were is how a shelf's style ends up
+        edited from inside one manual.
+        """
+        return R.parse(self.store.read(ST.RULES, None), source="project")
+
+    def write_rules(self, rules: list) -> Path:
+        """Replace this project's rules file.
+
+        **REFUSES A HOUSE RULE.** `House` is inherited and never copied in —
+        that is the whole reason a shelf can change its mind once and have
+        twelve manuals follow. Writing a house rule into `rules.json` would
+        turn the inheritance into a snapshot silently, and the snapshot
+        would go stale without anybody being told.
+
+        The designed way for one project to disagree is to override by ID,
+        which `merge` already does: take the house rule, change what you
+        want, mark it `source="project"`, and it wins here and nowhere
+        else. So the refusal names that path rather than just saying no.
+        """
+        strays = [r.id for r in rules if getattr(r, "source", "") == "house"]
+        if strays:
+            raise ValueError(
+                f"{', '.join(strays)} came from the house file and cannot "
+                f"be written into this project. To disagree with a house "
+                f"rule here, copy it, set its source to 'project', and it "
+                f"will override the house rule by id for this project "
+                f"alone.")
+        return self.store.write(ST.RULES, R.to_json(rules))
+
+    def write_doctypes(self, types: list) -> Path:
+        """Replace this project's document-type profiles."""
+        return self.store.write(ST.DOCTYPES, DT.to_json(types))
+
+    def set_craft_options(self, options: dict) -> Path:
+        """The craft thresholds for THIS project, over the house's.
+
+        Stored under `settings["craft"]` in `project.json`, and a value
+        equal to what the house already says is DROPPED rather than
+        written: `craft_options()` merges house-then-project, so a project
+        that restates the house's number keeps working only until the house
+        changes its mind, at which point it silently does not follow.
+        """
+        house = dict(self.house.settings.get("craft") or {})
+        mine = {k: v for k, v in (options or {}).items()
+                if v is not None and house.get(k) != v}
+        settings = dict(self.settings)
+        if mine:
+            settings["craft"] = mine
+        else:
+            settings.pop("craft", None)
+        self.settings = settings
+        return self.save()
+
     def write_example_rules(self) -> Path:
         """Put a starter rules file in place, if there is not one."""
         if self.store.exists(ST.RULES):

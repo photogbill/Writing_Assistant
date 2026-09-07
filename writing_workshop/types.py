@@ -221,6 +221,12 @@ class Claim:
     state: str = PROPOSED
     origin: str = "author"         # "author" | "extracted" | "measured"
     superseded_by: int = 0
+    #: Set on a claim that was CORRECTED — the claim was wrong, as
+    #: distinct from the fact having changed. A corrected claim is
+    #: `rejected` and keeps this link so the record can say what replaced
+    #: it; `superseded_by` stays for the other thing, where both values
+    #: were true in their turn and `reconsider` needs the old one.
+    replaced_by: int = 0
     note: str = ""
 
     @property

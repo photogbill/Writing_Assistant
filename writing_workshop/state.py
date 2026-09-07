@@ -32,6 +32,10 @@ DISMISSED = "dismissed.json"
 LAST_RUN = "last-run.json"
 INFLUENCE = "influence.json"
 RULES = "rules.json"
+#: Spelled here as well as in `doctypes.DOCTYPES_FILE`, which predates this
+#: module's rule that nothing else spells a file name. `doctypes` imports it
+#: from here now, so there is one spelling and a rename cannot half-happen.
+DOCTYPES = "doctypes.json"
 HOUSE = "house.json"
 
 

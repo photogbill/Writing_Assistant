@@ -28,10 +28,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .state import Store
+from .state import DOCTYPES as DOCTYPES_FILE, Store
 from .types import DOC_TYPES, FICTION, LYRICS, TECHNICAL
-
-DOCTYPES_FILE = "doctypes.json"
 
 
 @dataclass(frozen=True)
@@ -106,6 +104,33 @@ def load(store: Store | None = None, house_data=None) -> dict[str, DocType]:
     if store is not None:
         out.update(parse(store.read(DOCTYPES_FILE, None)))
     return out
+
+
+def to_json(types) -> dict:
+    """Profiles back into the shape `parse` reads. Round-trips.
+
+    **BUILT-INS ARE NEVER WRITTEN.** `parse` refuses a key that shadows one
+    and `load` puts them in first, so writing them out would produce a file
+    of three entries that are ignored on the next read — a file that lies
+    about what it controls.
+    """
+    out = []
+    for profile in types:
+        if profile.builtin or profile.key in BUILTIN:
+            continue
+        row = {"key": profile.key, "base": profile.base}
+        if profile.label:
+            row["label"] = profile.label
+        for name in ("add", "drop", "exports"):
+            value = tuple(getattr(profile, name) or ())
+            if value and (name != "exports" or value != ("plain",)):
+                row[name] = list(value)
+        if profile.options:
+            row["options"] = dict(profile.options)
+        if profile.blurb:
+            row["blurb"] = profile.blurb
+        out.append(row)
+    return {"doctypes": out}
 
 
 def get(key: str, known: dict[str, DocType] | None = None) -> DocType:

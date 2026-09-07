@@ -151,5 +151,38 @@ def example() -> list[dict]:
     ]
 
 
+#: What a rule is ALLOWED to carry into the file, and their defaults. A key
+#: at its default is left out, so a rules file an author opens in an editor
+#: is the decisions they made rather than eleven fields of boilerplate per
+#: rule. `source`, `error` and `regex` are deliberately absent: the first is
+#: where the rule was READ from and writing it into the project file would
+#: make a house rule a copy, and the other two are what compiling produced.
+WRITTEN = {"id": "", "message": "", "pattern": "", "phrase": "",
+           "severity": WARN, "scope": DEFAULT_SCOPE, "files": "",
+           "ignorecase": True, "whole_word": True, "hint": "",
+           "enabled": True}
+
+
+def to_json(rules: list) -> dict:
+    """Rules back into the shape `parse` reads. Round-trips.
+
+    A test asserts `parse(to_json(rules))` gives the same rules back,
+    because a settings editor that cannot read its own output is a settings
+    editor that eats the author's rules the second time they open it.
+    """
+    out = []
+    for rule in rules:
+        row = {"id": rule.id}
+        for name, default in WRITTEN.items():
+            if name == "id":
+                continue
+            value = getattr(rule, name, default)
+            if value != default:
+                row[name] = value
+        out.append(row)
+    return {"rules": out}
+
+
 __all__ = ["Rule", "SCOPES", "DEFAULT_SCOPE", "compile_one", "parse",
-           "merge", "example", "NOTE", "WARN", "DEFECT"]
+           "merge", "example", "to_json", "WRITTEN", "NOTE", "WARN",
+           "DEFECT"]

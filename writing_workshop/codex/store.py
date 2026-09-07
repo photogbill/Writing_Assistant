@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS claims (
     superseded_by INTEGER DEFAULT 0,
     note          TEXT DEFAULT '',
     key           TEXT DEFAULT '',
-    created       TEXT DEFAULT ''
+    created       TEXT DEFAULT '',
+    replaced_by   INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS claims_key   ON claims(key);
 CREATE INDEX IF NOT EXISTS claims_state ON claims(state);
@@ -55,7 +56,14 @@ CREATE TABLE IF NOT EXISTS journal (
 _COLS = ("id", "subject", "kind", "predicate", "value", "unit", "number",
          "source_ref", "section_id", "path", "span_start", "span_end",
          "quote", "state", "origin", "superseded_by", "note", "key",
-         "created")
+         "created", "replaced_by")
+
+#: Columns added after the first release, with the type to add them as.
+#: `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+#: exists, so a schema that grows needs this or every Codex written before
+#: today raises `no such column` on the first read — which is the shape of
+#: failure that looks like a corrupt project folder and is not.
+_ADDED = {"replaced_by": "INTEGER DEFAULT 0"}
 
 
 class Codex:
@@ -65,8 +73,20 @@ class Codex:
         self.db = sqlite3.connect(str(self.path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         self._clock = clock
+
+    def _migrate(self) -> None:
+        """Add columns this version knows about to a database written by
+        an older one. Additive only — nothing is dropped, renamed or
+        rewritten, because a migration that can lose an author's Codex is
+        worse than a feature that has to wait."""
+        have = {row[1] for row in self.db.execute("PRAGMA table_info(claims)")}
+        for column, decl in _ADDED.items():
+            if column not in have:
+                self.db.execute(
+                    f"ALTER TABLE claims ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         try:
@@ -149,6 +169,145 @@ class Codex:
         self._journal(added.id, "accepted", note)
         self.db.execute("UPDATE claims SET state=? WHERE id=?",
                         (ACCEPTED, added.id))
+        self.db.commit()
+        return added
+
+    # -- the author's own hand ---------------------------------------------
+    #
+    # Bill, 2026-09-06: *"everything should be editable, both the inputs and
+    # the outputs."* He is right, and a ledger is the case where taking that
+    # literally would destroy the thing being edited. Mutating an accepted
+    # claim in place would silently rewrite the record `reconsider` reasons
+    # over and the journal claims to hold; the answer is not to refuse the
+    # edit but to give the author THREE verbs instead of one, because the
+    # three things they might mean are genuinely different:
+    #
+    #   author()    a fact nothing read — the author asserts it themselves
+    #   revise()    this claim is still PROPOSED and nearly right; fix it
+    #   correct()   this claim is WRONG, as opposed to the fact having
+    #               CHANGED, which is `supersede`
+    #
+    # Conflating the last two is the expensive mistake. `supersede` says the
+    # world moved and both values were true in their turn, which is exactly
+    # what makes `reconsider` able to find the four passages still saying
+    # bronze. A correction says the claim never should have said that — a
+    # parser that attached the wrong subject, a typo, the wrong kind — and
+    # recording it as a supersession would send `reconsider` hunting the
+    # manuscript for a value the manuscript never contained.
+
+    def author(self, claim: Claim, *, accept: bool = False,
+               note: str = "") -> Claim:
+        """A claim the AUTHOR wrote, rather than one anything read.
+
+        TWO JOURNAL ENTRIES WHEN ACCEPTED, never one. The rule that no
+        constructor can make an accepted claim is not a formality to be
+        routed around by the first path that finds it inconvenient — it is
+        what makes `accepted` mean an act somebody took. The act is still
+        taken here; it just happens in the same breath as the writing, and
+        the journal records both halves in order.
+        """
+        claim.origin = "author"
+        claim.state = PROPOSED
+        added = self.add(claim, dedupe=False)
+        if accept:
+            self.accept(added.id, note or "written and accepted by the author")
+            added.state = ACCEPTED
+        return added
+
+    def revise(self, claim_id: int, *, subject: str | None = None,
+               predicate: str | None = None, value: str | None = None,
+               kind: str | None = None, note: str | None = None) -> Claim:
+        """Correct a claim IN PLACE. Only while it is still proposed.
+
+        The one in-place edit in this store, and it is safe for exactly one
+        reason: **nothing can depend on a proposed claim.** It is never
+        mirrored into O.W.L., never returned by `governing`, never used by
+        a check the author has agreed to, and no other claim links to it.
+        The common case is a model proposal that is nearly right and would
+        otherwise have to be rejected and retyped.
+
+        An accepted claim is a different matter and raises — use `correct`,
+        which keeps the wrong one and says why.
+        """
+        from . import claims as _claims
+
+        current = self.get(claim_id)
+        if current is None:
+            raise ValueError(f"no claim #{claim_id}")
+        if current.state != PROPOSED:
+            raise ValueError(
+                f"claim #{claim_id} is {current.state}, not proposed — a "
+                f"claim the author has decided about is corrected, not "
+                f"edited, so that the record says what happened")
+        #: Rebuilt through `make` rather than written field by field: the
+        #: number and unit are PARSED OUT of the value, so a value edited
+        #: from "40 Nm" to "45 Nm" that kept number=40.0 would leave a
+        #: numeric conflict check comparing the old figure against the new
+        #: text for ever.
+        fresh = _claims.make(
+            subject if subject is not None else current.subject,
+            predicate if predicate is not None else current.predicate,
+            value if value is not None else current.value,
+            kind=kind or current.kind, span=current.span,
+            source_ref=current.source_ref, section_id=current.section_id,
+            quote=current.quote, origin=current.origin,
+            note=current.note if note is None else note)
+        self.db.execute(
+            "UPDATE claims SET subject=?, kind=?, predicate=?, value=?, "
+            "unit=?, number=?, note=?, key=? WHERE id=?",
+            (fresh.subject, fresh.kind, fresh.predicate, fresh.value,
+             fresh.unit, fresh.number, fresh.note, fresh.key, claim_id))
+        self._journal(claim_id, "revised",
+                      f"{current.subject}: {current.predicate} = "
+                      f"{current.value}")
+        self.db.commit()
+        fresh.id = claim_id
+        fresh.state = PROPOSED
+        return fresh
+
+    def correct(self, old_id: int, new_claim: Claim,
+                note: str = "") -> Claim:
+        """The claim was WRONG. Not superseded — wrong.
+
+        The old one is REJECTED rather than superseded, so `reconsider`
+        does not go looking through the manuscript for passages that
+        depend on a value the manuscript may never have contained. It is
+        kept and linked, because a ledger that forgets its own mistakes
+        cannot be audited for them, and because "why is this claim
+        rejected" is a question with an answer worth storing.
+
+        THE EVIDENCE IS INHERITED, not re-invented. A correction changes
+        the READING of a passage, never the passage: the span, the quote,
+        the source reference and the section come across unless the caller
+        supplied their own. An author who retypes a quote has changed what
+        the document is recorded as saying, which is the one edit this
+        store must not offer.
+        """
+        old = self.get(old_id)
+        if old is None:
+            raise ValueError(f"no claim #{old_id}")
+        if not new_claim.span and old.span:
+            new_claim.span = old.span
+        for field in ("source_ref", "section_id", "quote"):
+            if not getattr(new_claim, field, ""):
+                setattr(new_claim, field, getattr(old, field, ""))
+        new_claim.origin = "author"
+        new_claim.state = PROPOSED
+        added = self.add(new_claim, dedupe=False)
+        #: An accepted claim's correction is accepted: the author is not
+        #: proposing a reading, they are asserting the right one in place
+        #: of a wrong one they had already agreed to. A proposed claim's
+        #: correction stays proposed, and would normally have gone through
+        #: `revise` instead.
+        if old.state in (ACCEPTED, SUPERSEDED):
+            self.accept(added.id, note or f"corrects #{old_id}")
+            added.state = ACCEPTED
+        self.db.execute(
+            "UPDATE claims SET state=?, replaced_by=? WHERE id=?",
+            (REJECTED, added.id, old_id))
+        self._journal(old_id, "corrected",
+                      note or f"was “{old.subject}: {old.predicate} = "
+                              f"{old.value}”; replaced by #{added.id}")
         self.db.commit()
         return added
 
@@ -274,4 +433,15 @@ def _to_claim(row: sqlite3.Row) -> Claim:
         section_id=row["section_id"] or "", span=span,
         quote=row["quote"] or "", state=row["state"],
         origin=row["origin"] or "author",
-        superseded_by=row["superseded_by"] or 0, note=row["note"] or "")
+        superseded_by=row["superseded_by"] or 0, note=row["note"] or "",
+        replaced_by=_column(row, "replaced_by"))
+
+
+def _column(row: sqlite3.Row, name: str, default: int = 0):
+    """A column an older database may not have. `_migrate` adds it on
+    open, so this is belt and braces for a store opened read-only or by a
+    caller that built its own connection."""
+    try:
+        return row[name] or default
+    except (IndexError, KeyError):
+        return default
