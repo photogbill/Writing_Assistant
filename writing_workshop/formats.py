@@ -33,6 +33,12 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+
+#: What a reader of this module should be told it does NOT read. Said in
+#: `Manuscript.notes()` for every .docx, because a check that found nothing
+#: in a footnote it never opened is not a clean result.
+NOT_READ = "footnotes, endnotes, comments, headers and footers are not read"
 
 #: Extensions this module can turn into text.
 DERIVED_SUFFIXES = (".docx",)
@@ -95,6 +101,27 @@ def _numbering(zf: zipfile.ZipFile) -> dict[str, str]:
     return out
 
 
+def _style_outline(zf: zipfile.ZipFile) -> dict[str, int]:
+    """styleId -> heading level from the style's own `w:outlineLvl`."""
+    try:
+        root = ET.fromstring(zf.read("word/styles.xml"))
+    except (KeyError, ET.ParseError):
+        return {}
+    out: dict[str, int] = {}
+    for node in root.iter(f"{W}style"):
+        sid = node.get(f"{W}styleId") or ""
+        props = node.find(f"{W}pPr")
+        lvl = props.find(f"{W}outlineLvl") if props is not None else None
+        if sid and lvl is not None:
+            try:
+                value = int(lvl.get(f"{W}val") or 9)
+            except ValueError:
+                continue
+            if 0 <= value <= 5:
+                out[sid] = value + 1
+    return out
+
+
 def _style_numbering(zf: zipfile.ZipFile) -> tuple[dict[str, str],
                                                    dict[str, str]]:
     """styleId -> numId, and styleId -> style NAME, from `word/styles.xml`.
@@ -139,18 +166,92 @@ _LIST_STYLE = re.compile(r"^list(paragraph|number|bullet|continue)", re.I)
 _ORDERED_STYLE = re.compile(r"^list(number|paragraph)", re.I)
 
 
+#: Subtrees that are not this paragraph's own visible text (2026-10-28):
+#: the far side of a tracked MOVE (`moveFrom` — the moved sentence used to
+#: appear twice), the fallback copy of a drawing (text-box text appeared
+#: twice), and a text box itself, which is read as its own paragraph
+#: rather than glued onto the sentence it is anchored in ("See the
+#: label.Hot surfaceHot surface").
+_SKIP = {f"{W}moveFrom", f"{MC}Fallback", f"{W}txbxContent", f"{W}del"}
+
+#: Symbol-font characters Word stores as `w:sym` — an Ω in a resistor value
+#: used to vanish. The common ones, and the private-use offset otherwise.
+_SYMBOL = {0x57: "Ω", 0x6D: "μ", 0xB0: "°", 0xB1: "±", 0xD7: "×",
+           0xA3: "≤", 0xB3: "≥", 0xBB: "≈", 0xAE: "→"}
+
+
+def _sym(node) -> str:
+    raw = node.get(f"{W}char") or ""
+    try:
+        code = int(raw, 16)
+    except ValueError:
+        return ""
+    if code >= 0xF000:
+        code -= 0xF000
+    if (node.get(f"{W}font") or "").lower().startswith("symbol"):
+        return _SYMBOL.get(code, chr(code))
+    return chr(code)
+
+
 def _text_of(node) -> str:
     """One paragraph's visible text, tabs and breaks included."""
     parts: list[str] = []
-    for child in node.iter():
-        tag = child.tag
-        if tag == f"{W}t":
-            parts.append(child.text or "")
-        elif tag == f"{W}tab":
-            parts.append("\t")
-        elif tag in (f"{W}br", f"{W}cr"):
-            parts.append(" ")
+
+    def walk(element) -> None:
+        for child in element:
+            tag = child.tag
+            if tag in _SKIP:
+                continue
+            if tag == f"{W}t":
+                parts.append(child.text or "")
+            elif tag == f"{W}tab":
+                parts.append("\t")
+            elif tag in (f"{W}br", f"{W}cr"):
+                parts.append(" ")
+            elif tag == f"{W}noBreakHyphen":
+                parts.append("-")        # "Wi-Fi", not "WiFi"
+            elif tag == f"{W}sym":
+                parts.append(_sym(child))
+            walk(child)
+    walk(node)
     return "".join(parts).strip()
+
+
+def _text_boxes(node) -> list[str]:
+    """Paragraphs inside text boxes anchored in this paragraph, once each."""
+    out: list[str] = []
+
+    def walk(element) -> None:
+        for child in element:
+            if child.tag == f"{MC}Fallback":
+                continue
+            if child.tag == f"{W}txbxContent":
+                for para in child.iter(f"{W}p"):
+                    text = _text_of(para)
+                    if text:
+                        out.append(text)
+                continue
+            walk(child)
+    walk(node)
+    return out
+
+
+def _blocks(container):
+    """Paragraphs and tables in reading order, INCLUDING those inside a
+    content control (`w:sdt`). Those were dropped entirely — a template
+    built from content controls read as an empty document."""
+    for node in container:
+        if node.tag == f"{W}sdt":
+            content = node.find(f"{W}sdtContent")
+            if content is not None:
+                yield from _blocks(content)
+        elif node.tag in (f"{W}p", f"{W}tbl"):
+            yield node
+
+
+#: A Word paragraph that begins like markdown structure must not BECOME
+#: structure: "# of retries" was read as a chapter heading.
+_LOOKS_LIKE_MARKUP = re.compile(r"^(#{1,6}\s|>|[-*+]\s|\d+[.)]\s|\|)")
 
 
 def _style(node) -> tuple[str, str, int]:
@@ -177,7 +278,18 @@ def _style(node) -> tuple[str, str, int]:
     return style, num_id, level
 
 
-def _heading_level(style: str) -> int:
+def _heading_level(style: str, name: str = "", outline: int = 0) -> int:
+    """By the style's NAME first — a German document's heading style has
+    the id "berschrift1" and the name "heading 1" — then its outline level,
+    then the id."""
+    for candidate in (name, style):
+        level = _heading_name(candidate)
+        if level:
+            return level
+    return outline
+
+
+def _heading_name(style: str) -> int:
     if not style:
         return 0
     plain = style.replace("-", " ").replace("_", " ").strip()
@@ -210,6 +322,7 @@ def read_docx(path: str | Path) -> str:
     with zipfile.ZipFile(path) as zf:
         numbering = _numbering(zf)
         style_num, style_names = _style_numbering(zf)
+        style_outline = _style_outline(zf)
         try:
             raw = zf.read("word/document.xml")
         except KeyError as exc:
@@ -222,7 +335,7 @@ def read_docx(path: str | Path) -> str:
 
     lines: list[str] = []
     counters: dict[str, int] = {}
-    for node in body:
+    for node in _blocks(body):
         if node.tag == f"{W}tbl":
             counters.clear()
             rows = [_row_text(r) for r in node.findall(f"{W}tr")]
@@ -241,6 +354,7 @@ def read_docx(path: str | Path) -> str:
         if node.tag != f"{W}p":
             continue
         text = _text_of(node)
+        boxes = _text_boxes(node)
         style, num_id, level = _style(node)
         listed = ""
         if num_id:
@@ -257,8 +371,19 @@ def read_docx(path: str | Path) -> str:
         if not text:
             counters.clear()
             lines.append("")
+            for box in boxes:
+                lines += [_escape(box), ""]
             continue
-        heading = _heading_level(style)
+        outline = style_outline.get(style, 0)
+        props = node.find(f"{W}pPr")
+        own = props.find(f"{W}outlineLvl") if props is not None else None
+        if own is not None:
+            try:
+                value = int(own.get(f"{W}val") or 9)
+                outline = value + 1 if 0 <= value <= 5 else outline
+            except ValueError:
+                pass
+        heading = _heading_level(style, style_names.get(style, ""), outline)
         if heading:
             counters.clear()
             lines.append("")
@@ -275,6 +400,12 @@ def read_docx(path: str | Path) -> str:
             continue
         counters.clear()
         lines.append("")
-        lines.append(text)
+        lines.append(_escape(text))
+        for box in boxes:
+            lines += ["", _escape(box)]
     out = "\n".join(lines)
     return re.sub(r"\n{3,}", "\n\n", out).strip() + "\n"
+
+
+def _escape(text: str) -> str:
+    return "\\" + text if _LOOKS_LIKE_MARKUP.match(text) else text

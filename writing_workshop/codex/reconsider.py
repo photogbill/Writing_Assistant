@@ -13,10 +13,12 @@ silently rewrote it would be doing the author's job badly.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from .. import textio as T
 from ..types import Span
-from ..units import NUM_UNIT, interval, split_value
+from ..units import NUM_UNIT, dimension, interval, split_value
 
 #: A passage that names the subject AND still carries the old value.
 DIRECT = 3
@@ -40,9 +42,18 @@ class Dependent:
         return self.strength >= DIRECT
 
 
+#: Function words a value's own words are matched WITHOUT. Deliberately
+#: tiny: the common-English list used to be applied here, and it holds
+#: gold, red, black, white, old, new, lead, short and young — exactly the
+#: values the extractor emits — so "still gold under the dust" could never
+#: be found as a passage carrying the old value.
+_FUNCTION_WORDS = {"the", "and", "for", "with", "from", "that", "this",
+                   "its", "his", "her", "their", "was", "are", "is"}
+
+
 def _value_tokens(value: str) -> list[str]:
     return [T.normalise(w) for w in T.word_list(value)
-            if len(w) > 2 and not T.is_common(w)]
+            if len(w) > 2 and T.normalise(w) not in _FUNCTION_WORDS]
 
 
 def _mentions_value(text: str, value: str) -> bool:
@@ -60,8 +71,18 @@ def _mentions_value(text: str, value: str) -> bool:
         target = interval(raw, unit)
         if target is None:
             return False
+        want = dimension(unit)
         for m in NUM_UNIT.finditer(text):
-            other = interval(m.group("num"), m.group("unit").lower())
+            found = m.group("unit")
+            #: SAME DIMENSION, or it is not the old value at all. A torque
+            #: of 40 Nm used to make "rated for 40 kg" and "after 40 s"
+            #: CERTAIN dependents — a number is not a quantity without its
+            #: unit. Temperatures, which do not convert, need the same unit.
+            if dimension(found) != want:
+                continue
+            if want == "temperature" and found.lower() != unit.lower():
+                continue
+            other = interval(m.group("num"), found)
             if other is None:
                 continue
             if not (other[1] < target[0] or target[1] < other[0]):
@@ -166,6 +187,8 @@ def ask_model(host, claim, new_value: str, dependent: Dependent,
     except Exception:                                # noqa: BLE001
         return ""
     reply = (reply or "").strip()
-    if reply.upper().startswith("NO"):
+    if re.match(r"no\b", reply, re.I):
         return ""
-    return reply.lstrip("YES").lstrip(" —-:").strip()
+    #: `lstrip("YES")` strips CHARACTERS, not a word: "Yes — the blade
+    #: rang" came back as "es — the blade rang".
+    return re.sub(r"^\s*yes\b[\s—–:\-]*", "", reply, flags=re.I).strip()

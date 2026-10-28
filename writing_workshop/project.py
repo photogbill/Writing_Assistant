@@ -143,6 +143,9 @@ class Project:
     #: rest are skipped WITH A REASON.
     language: str = DEFAULT_LANGUAGE
     _house: House | None = field(default=None, repr=False)
+    #: What went wrong opening this project, in words a host can show.
+    #: Never a reason to refuse to open it — the book is the `.md` files.
+    problems: list[str] = field(default_factory=list, repr=False)
 
     # -- paths ------------------------------------------------------------
 
@@ -183,7 +186,22 @@ class Project:
         proj = cls(root=root, name=root.name)
         path = root / WORKSHOP_DIR / PROJECT_FILE
         if path.exists():
-            proj._apply(json.loads(path.read_text(encoding="utf-8")))
+            # A truncated or hand-broken project.json used to raise here,
+            # and the author could not open their book at all. The book is
+            # the .md files; this is settings. So: defaults, a problem the
+            # host can show, and the damaged file kept by `save`.
+            try:
+                data, note = ST.parse_json(path.read_text(encoding="utf-8-sig"))
+            except (ValueError, OSError, UnicodeDecodeError) as exc:
+                data, note = {}, ""
+                proj.problems.append(
+                    f"{PROJECT_FILE} could not be read ({exc}), so this "
+                    f"project opened with default settings. The file is "
+                    f"left as it is; the next save keeps a copy as "
+                    f"{PROJECT_FILE}.corrupt-<time> first.")
+            if note:
+                proj.problems.append(f"{PROJECT_FILE} was {note}.")
+            proj._apply(data if isinstance(data, dict) else {})
         elif create:
             proj.save()
         return proj
@@ -198,7 +216,11 @@ class Project:
         self.terms = list(data.get("terms") or [])
         if data.get("glossary_titles"):
             self.glossary_titles = list(data["glossary_titles"])
-        self.targets = Targets(**(data.get("targets") or {}))
+        known = set(Targets.__dataclass_fields__)
+        targets = data.get("targets")
+        self.targets = Targets(**{k: v for k, v in (
+            targets.items() if isinstance(targets, dict) else ())
+            if k in known})
         self.settings = dict(data.get("settings") or {})
         self.language = str(data.get("language")
                             or DEFAULT_LANGUAGE).strip().lower() or \
@@ -216,8 +238,9 @@ class Project:
             "language": self.language,
             "targets": asdict(self.targets), "settings": self.settings,
         }
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                        encoding="utf-8")
+        ST.keep_damaged(path)
+        ST.write_atomic(path, json.dumps(payload, indent=2,
+                                         ensure_ascii=False))
         return path
 
     # -- the manuscript ---------------------------------------------------
@@ -234,7 +257,12 @@ class Project:
 
     @property
     def is_fiction(self) -> bool:
-        return self.document_type == FICTION
+        """Fiction by BASE, so a declared "novella" (base fiction) counts —
+        the raw key matched nothing but the built-in itself."""
+        try:
+            return self.profile().base == FICTION
+        except Exception:                             # noqa: BLE001
+            return self.document_type == FICTION
 
     # -- the workshop's own side files ------------------------------------
 

@@ -177,11 +177,14 @@ for finding in report.problems():
 
 ```
 python -m unittest discover -s tests -t tests
+python -m pytest            # the same suite; pyproject puts tests/ on the path
 ```
 
-225 checks, no third-party dependency, no Qt, no model. They are
-`unittest`-style deliberately: a pytest-only suite is silently collected as
-*nothing* by `unittest discover`, which reports OK while tests are failing,
-and a suite that can lie about being green is worse than no suite.
+337 tests (2026-10-28), no third-party dependency, no Qt, no model. They
+are `unittest`-style deliberately: a pytest-only suite is silently
+collected as *nothing* by `unittest discover`, which reports OK while tests
+are failing, and a suite that can lie about being green is worse than no
+suite. Both runners collect all of them — until 2026-10-28 pytest
+collected none, with seventeen collection errors.
 
 Apache-2.0.

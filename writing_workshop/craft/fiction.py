@@ -63,6 +63,15 @@ def pacing(ctx: Ctx) -> CraftReport:
     summary = describe(counts)
     rep.metrics["chapter_words"] = summary
     median = summary["median"] or 0
+    if len(counts) < 4:
+        # Said, not silent: a .txt novel with no chapter lines a reader
+        # could see used to come back with no pacing findings and no
+        # reason, which reads as "your pacing is fine".
+        rep.quiet["pacing"] = (
+            f"{len(counts)} chapter{'s' if len(counts) != 1 else ''} found "
+            f"and it compares against your median, so it needs four. "
+            f"Chapters are `#` headings — or, in a .txt file, lines like "
+            f"“CHAPTER 7” or “Chapter Seven”.")
     if median and len(counts) >= 4:
         for row in chapters:
             if row["words"] > median * 2.2:
@@ -256,6 +265,13 @@ def presence(ctx: Ctx) -> CraftReport:
     chapters = ctx.doc.chapters()
     if not cast or len(chapters) < 3:
         rep.metrics["presence"] = {}
+        rep.quiet["presence"] = (
+            "no characters were found or given — add them to the cast"
+            if not cast else
+            f"{len(chapters)} chapter{'s' if len(chapters) != 1 else ''} "
+            f"found and presence over time needs at least three. Chapters "
+            f"are `#` headings — or, in a .txt file, lines like “CHAPTER "
+            f"7”.")
         return rep
     matrix: dict[str, list[int]] = {}
     for name in cast:

@@ -29,11 +29,19 @@ argument is that it does not put words in the author's mouth.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 import re
 
 from . import textio as T
 from .types import Span
+
+#: Stdlib logging, silent unless a host configures it. A speech port that
+#: raises is caught here so one bad passage cannot stop a chapter — and a
+#: caught failure with no trace is how "Speech failed — see the log" came
+#: to point at an empty log.
+_LOG = logging.getLogger(__name__)
+_LOG.addHandler(logging.NullHandler())
 
 #: Piper is comfortable well past this; the limit is the AUTHOR's, not the
 #: synthesiser's. A clip longer than a paragraph cannot be re-listened to
@@ -182,6 +190,8 @@ def speak(host, line: Line, out_path: str = "") -> str:
     try:
         return speech.speak(line.text, voice=line.voice, out_path=out_path)
     except Exception:                                 # noqa: BLE001
+        _LOG.warning("speech port raised on a %d-character passage",
+                     len(line.text or ""), exc_info=True)
         return ""
 
 
@@ -203,6 +213,8 @@ def render_job(host, job: Job, joiner=None) -> list[str]:
             path = speech.speak(line.text, voice=line.voice,
                                 out_path=str(target))
         except Exception:                             # noqa: BLE001
+            _LOG.warning("speech port raised on line %d of %s", i,
+                         job.out_path, exc_info=True)
             continue
         if path:
             clips.append(path)

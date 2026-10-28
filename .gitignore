@@ -1,0 +1,16 @@
+# Generated files. Until 2026-10-28 there was no .gitignore and 115 .pyc
+# files plus the egg-info were tracked, so `PKG-INFO` showed as modified
+# after every `pip install -e`. untrack_generated.bat removes the ones
+# already in the index (once); this keeps new ones out.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/

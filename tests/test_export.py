@@ -78,5 +78,56 @@ class Plain(unittest.TestCase):
             self.assertIn(src.text.strip()[:40], body)
 
 
+class ShunnGetsTheBookRight(unittest.TestCase):
+    """2026-10-28."""
+
+    def test_chapters_under_a_title_heading_are_exported(self):
+        import tempfile
+        from pathlib import Path
+        from writing_workshop import Manuscript
+        from writing_workshop import export as EX
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "01.md").write_text(
+                "# The Long Road\n\n## Chapter One\n\nMira walked for a "
+                "day and a night.\n\n## Chapter Two\n\nAleksandr waited "
+                "by the bridge.\n", encoding="utf-8")
+            spec = EX.shunn_spec(Manuscript.load(tmp))
+        self.assertEqual(spec.title, "The Long Road")
+        self.assertEqual([t for t, _p in spec.chapters],
+                         ["Chapter One", "Chapter Two"])
+        self.assertIn("Mira walked for a day and a night.",
+                      spec.chapters[0][1])
+
+    def test_prose_under_the_title_heading_is_not_dropped(self):
+        """Found by the independent check: a prologue written straight
+        under `# The Long Road` vanished from the export, unsaid."""
+        import tempfile
+        from pathlib import Path
+        from writing_workshop import Manuscript
+        from writing_workshop import export as EX
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "01.md").write_text(
+                "# The Long Road\n\nBefore any of it, there was the road."
+                "\n\n## Chapter One\n\nMira walked.\n\n## Chapter Two\n\n"
+                "Aleksandr waited.\n", encoding="utf-8")
+            spec = EX.shunn_spec(Manuscript.load(tmp))
+        self.assertEqual(spec.chapters[0],
+                         ("", ["Before any of it, there was the road."]))
+        md = EX.shunn_markdown(spec)
+        self.assertIn("Before any of it", md)
+        self.assertNotIn("## \n", md)
+
+    def test_word_count_rounds_the_way_shunn_says(self):
+        from writing_workshop.export.shunn import ShunnSpec
+
+        def rounded(n):
+            return ShunnSpec(title="", word_count=n).rounded_words
+        self.assertEqual(rounded(1486), 1500)   # Shunn's own example
+        self.assertEqual(rounded(1507), 1500)
+        self.assertEqual(rounded(1250), 1300)   # half rounds up
+        self.assertEqual(rounded(18240), 18000)  # novella: nearest 500
+        self.assertEqual(rounded(40), 40)        # never "about 0 words"
+
+
 if __name__ == "__main__":
     unittest.main()

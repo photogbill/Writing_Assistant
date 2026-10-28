@@ -21,8 +21,9 @@ from pathlib import Path
 import re
 import shutil
 
+from . import state as ST
 from . import textio as T
-from .document import SKIP_DIRS, SUFFIXES
+from .document import SKIP_DIRS, SUFFIXES, decode
 from .errors import ProjectError
 from .types import VersionInfo
 
@@ -45,6 +46,8 @@ class Versions:
         self.project = project
         self.root = project.versions_dir
         self._clock = clock
+        #: Set by `list` when the index had to be recovered; "" otherwise.
+        self.problem = ""
 
     def _now(self) -> str:
         if self._clock is not None:
@@ -59,19 +62,74 @@ class Versions:
         return self.root / INDEX
 
     def list(self) -> list[VersionInfo]:
+        """Every named version.
+
+        A damaged index used to read as `[]`, and the next save wrote a
+        one-row index over it: every other version was still on disk and
+        none of them could be listed, restored or deleted from the tool.
+        Now the folders are the fallback truth — each one becomes a row,
+        named after its folder, and `problem` says so.
+        """
+        self.problem = ""
         if not self.index_path.exists():
-            return []
+            if not self._folders():
+                return []
+            self.problem = (f"{INDEX} is missing; the versions below were "
+                            f"found by their folders and are named after "
+                            f"them.")
+            return self._recovered()
         try:
-            rows = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            rows, _note = ST.parse_json(
+                self.index_path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            self.problem = (f"{INDEX} could not be read ({exc}); the "
+                            f"versions below were found by their folders. "
+                            f"The next save keeps the damaged index as "
+                            f"{INDEX}.corrupt-<time>.")
+            return self._recovered()
+        known = set(VersionInfo.__dataclass_fields__)
+        out = []
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            fields = {k: v for k, v in row.items() if k in known}
+            # A hand-edited row missing a required field used to raise
+            # here and take the whole list down with it.
+            fields.setdefault("name", str(row["id"]))
+            fields.setdefault("created", "")
+            out.append(VersionInfo(**fields))
+        listed = {r.id for r in out}
+        for folder in self._folders():
+            if folder.name not in listed:
+                out.append(self._row_for(folder))
+        return out
+
+    def _folders(self) -> list[Path]:
+        """Version folders on disk. A dot-folder is a save in progress (or
+        one that died mid-copy) and is never a version."""
+        if not self.root.is_dir():
             return []
-        return [VersionInfo(**row) for row in rows if isinstance(row, dict)]
+        return sorted((p for p in self.root.iterdir()
+                       if p.is_dir() and not p.name.startswith(".")),
+                      key=lambda p: p.stat().st_mtime)
+
+    def _row_for(self, folder: Path) -> VersionInfo:
+        import datetime as _dt
+        when = _dt.datetime.fromtimestamp(folder.stat().st_mtime)
+        return VersionInfo(
+            id=folder.name, name=folder.name,
+            created=when.replace(microsecond=0).isoformat(" "),
+            note="found on disk — not in the versions index",
+            files=len(self.files_in(folder.name)))
+
+    def _recovered(self) -> list[VersionInfo]:
+        return [self._row_for(folder) for folder in self._folders()]
 
     def _write_index(self, rows: list[VersionInfo]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        self.index_path.write_text(
-            json.dumps([asdict(r) for r in rows], indent=2,
-                       ensure_ascii=False), encoding="utf-8")
+        ST.keep_damaged(self.index_path)
+        ST.write_atomic(self.index_path, json.dumps(
+            [asdict(r) for r in rows], indent=2, ensure_ascii=False))
 
     def get(self, version_id: str) -> VersionInfo | None:
         for row in self.list():
@@ -84,9 +142,20 @@ class Versions:
     def save(self, name: str, note: str = "") -> VersionInfo:
         """Copy every manuscript file into a named folder."""
         rows = self.list()
-        version_id = _slug(name, {r.id for r in rows})
-        dest = self.root / version_id
-        dest.mkdir(parents=True, exist_ok=True)
+        # Taken = every id in the index AND every folder on disk. A folder
+        # the index forgot still holds files, and copying a new version
+        # into it means a restore later brings back chapters that were
+        # cut between the two.
+        taken = {r.id for r in rows} | {p.name for p in self._folders()}
+        version_id = _slug(name, taken)
+        final = self.root / version_id
+        # Copied into a dot-folder and renamed only once complete: a full
+        # disk mid-copy used to leave a half version that listed — and
+        # restored — as if it were whole.
+        dest = self.root / f".{version_id}.saving"
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=False)
         files = 0
         words = 0
         for path in self._manuscript_files():
@@ -97,9 +166,10 @@ class Versions:
             files += 1
             try:
                 words += len(T.word_list(
-                    T.prose_of(path.read_text(encoding="utf-8"))))
-            except (OSError, UnicodeDecodeError):
+                    T.prose_of(decode(path.read_bytes())[0])))
+            except OSError:
                 pass
+        dest.rename(final)
         info = VersionInfo(id=version_id, name=name.strip() or version_id,
                            created=self._now(), note=note, files=files,
                            words=words)
@@ -151,8 +221,11 @@ class Versions:
         if not path.exists():
             return ""
         try:
-            return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            # The same decoding the manuscript uses: a cp1252 chapter
+            # read strictly was "" here, and the diff called the whole
+            # chapter deleted.
+            return decode(path.read_bytes())[0]
+        except OSError:
             return ""
 
     def current_text(self, rel: str) -> str:
@@ -160,8 +233,11 @@ class Versions:
         if not path.exists():
             return ""
         try:
-            return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            # The same decoding the manuscript uses: a cp1252 chapter
+            # read strictly was "" here, and the diff called the whole
+            # chapter deleted.
+            return decode(path.read_bytes())[0]
+        except OSError:
             return ""
 
     def diff(self, version_id: str, rel: str = "",

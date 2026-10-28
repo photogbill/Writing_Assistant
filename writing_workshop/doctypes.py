@@ -83,17 +83,34 @@ def parse(data, *, builtin: bool = False) -> dict[str, DocType]:
         key = str(raw.get("key") or "").strip().lower()
         if not key or key in BUILTIN:
             continue
-        base = str(raw.get("base") or TECHNICAL).strip().lower()
+        # A base written as "" (or null) is "no base — start from `add`
+        # alone", which `to_json` writes on purpose. `or TECHNICAL` turned
+        # it back into technical on the next read, so a type built from
+        # three named checks came back running all twenty.
+        if "base" in raw:
+            base = str(raw.get("base") or "").strip().lower()
+        else:
+            base = TECHNICAL
         if base and base not in DOC_TYPES:
             base = TECHNICAL
+        options = raw.get("options")
         out[key] = DocType(
             key=key, label=str(raw.get("label") or ""), base=base,
-            add=tuple(raw.get("add") or ()),
-            drop=tuple(raw.get("drop") or ()),
-            options=dict(raw.get("options") or {}),
-            exports=tuple(raw.get("exports") or ("plain",)),
+            add=_names(raw.get("add")), drop=_names(raw.get("drop")),
+            options=dict(options) if isinstance(options, dict) else {},
+            exports=_names(raw.get("exports")) or ("plain",),
             blurb=str(raw.get("blurb") or ""), builtin=builtin)
     return out
+
+
+def _names(value) -> tuple[str, ...]:
+    """A list of check names as a tuple. A hand-written `"add": "echo"`
+    is one name, not the four letters `tuple("echo")` made of it."""
+    if isinstance(value, str):
+        value = value.replace(",", " ").split()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(v).strip() for v in value if str(v).strip())
 
 
 def load(store: Store | None = None, house_data=None) -> dict[str, DocType]:

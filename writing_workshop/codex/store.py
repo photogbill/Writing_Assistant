@@ -13,8 +13,11 @@ provenance — which is the only thing it was for.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
 from pathlib import Path
 import sqlite3
+import threading
 
 from ..types import (ACCEPTED, PROPOSED, REJECTED, SUPERSEDED, Claim, Span)
 
@@ -67,15 +70,71 @@ _ADDED = {"replaced_by": "INTEGER DEFAULT 0"}
 
 
 class Codex:
+    """One Codex file, safe to share between a GUI thread and its workers.
+
+    THE THREADING RULE, and the defect that made it one (2026-10-28). The
+    host opens the Codex on its GUI thread and then reads and writes it
+    from background jobs — the Continuity sweep, extraction, the drafting
+    autopilot. `sqlite3.connect` defaults to `check_same_thread=True`, so
+    every one of those jobs raised `ProgrammingError` and the host either
+    showed a failure or, in the drafting path, swallowed it and drafted
+    with no accepted facts at all. A store that only works on the thread
+    that opened it is a store a desktop app cannot use.
+
+    So: one connection, `check_same_thread=False`, and EVERY use of it
+    under one re-entrant lock. Writes go through `_tx`, which commits once
+    at the outermost level and rolls back on any exception — so a
+    supersession or a correction is one transaction, not three statements
+    that a crash can leave half done.
+    """
+
     def __init__(self, path: str | Path, clock=None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(self.path))
+        self._lock = threading.RLock()
+        self._depth = 0
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False,
+                                  timeout=30.0)
         self.db.row_factory = sqlite3.Row
-        self.db.executescript(SCHEMA)
-        self._migrate()
-        self.db.commit()
+        #: The default rollback journal, deliberately not WAL: WAL keeps
+        #: recent commits in a `-wal` file beside the database until a
+        #: checkpoint, and an author who copies the project folder while
+        #: the host is open would copy a Codex missing its latest decisions.
+        #: The lock below already serialises this process; `timeout` covers
+        #: a second process (the CLI) holding the file for a moment.
+        with self._tx():
+            self.db.executescript(SCHEMA)
+            self._migrate()
         self._clock = clock
+
+    @contextmanager
+    def _tx(self):
+        """The lock, and one commit (or rollback) at the outermost level."""
+        with self._lock:
+            self._depth += 1
+            try:
+                yield self.db
+            except BaseException:
+                self._depth -= 1
+                if self._depth == 0:
+                    self.db.rollback()
+                raise
+            self._depth -= 1
+            if self._depth == 0:
+                try:
+                    self.db.commit()
+                except BaseException:
+                    # A commit that fails (the file is locked past the
+                    # timeout) must not leave the connection inside an
+                    # open transaction that the next write silently joins.
+                    self.db.rollback()
+                    raise
+
+    def _read(self, sql: str, args=()) -> list:
+        """Every read materialises under the lock: a cursor iterated on
+        another thread after the lock is released is the same race again."""
+        with self._lock:
+            return self.db.execute(sql, args).fetchall()
 
     def _migrate(self) -> None:
         """Add columns this version knows about to a database written by
@@ -89,10 +148,11 @@ class Codex:
                     f"ALTER TABLE claims ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
-        try:
-            self.db.close()
-        except Exception:                            # noqa: BLE001
-            pass
+        with self._lock:
+            try:
+                self.db.close()
+            except Exception:                        # noqa: BLE001
+                pass
 
     def _now(self) -> str:
         if self._clock is not None:
@@ -106,10 +166,17 @@ class Codex:
         """Insert a claim as PROPOSED. Re-adding the same claim from the
         same passage is a no-op, so re-running extraction after an edit
         does not multiply the Codex by the number of times it was run."""
-        if dedupe:
-            existing = self._find_same(claim)
-            if existing is not None:
-                return existing
+        return self._add(claim, dedupe)[0]
+
+    def _add(self, claim: Claim, dedupe: bool = True) -> tuple[Claim, bool]:
+        with self._tx():
+            if dedupe:
+                existing = self._find_same(claim)
+                if existing is not None:
+                    return existing, False
+            return self._insert(claim), True
+
+    def _insert(self, claim: Claim) -> Claim:
         row = (claim.subject, claim.kind, claim.predicate, claim.value,
                claim.unit, claim.number, claim.source_ref, claim.section_id,
                claim.span.path if claim.span else "",
@@ -124,16 +191,38 @@ class Codex:
             "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
         claim.id = int(cur.lastrowid)
         self._journal(claim.id, "proposed", claim.source_ref)
-        self.db.commit()
         return claim
 
     def _find_same(self, claim: Claim) -> Claim | None:
-        cur = self.db.execute(
-            "SELECT * FROM claims WHERE key=? AND value=? AND source_ref=? "
-            "AND state != ?",
-            (claim.key, claim.value, claim.source_ref, REJECTED))
-        row = cur.fetchone()
-        return _to_claim(row) if row else None
+        """The same reading of the same passage, WHATEVER was decided.
+
+        Two things this used to get wrong, both measured:
+
+        * It matched on `source_ref`, which ends "para N". Insert one
+          paragraph above a passage and every claim below it was proposed
+          again — including ones the author had already ACCEPTED, now
+          sitting beside themselves as fresh proposals.
+        * It skipped REJECTED claims, so a reading the author had thrown
+          out came straight back as a new proposal on the next pass.
+          Rejecting something has to stick, or the button is a suggestion.
+
+        Same key, same value, same section and the same quoted sentence is
+        the same claim. A passage that is EDITED reads differently and is
+        proposed afresh, which is right: the author changed what it says.
+        """
+        rows = self._read(
+            "SELECT * FROM claims WHERE key=? AND value=? ORDER BY id",
+            (claim.key, claim.value))
+        mine = _quote_key(claim.quote)
+        for row in rows:
+            if claim.section_id and row["section_id"] \
+                    and row["section_id"] != claim.section_id:
+                continue
+            if mine and _quote_key(row["quote"] or "") == mine:
+                return _to_claim(row)
+            if not mine and (row["source_ref"] or "") == claim.source_ref:
+                return _to_claim(row)
+        return None
 
     def _journal(self, claim_id: int, action: str, detail: str = "") -> None:
         self.db.execute(
@@ -141,10 +230,10 @@ class Codex:
             "(?,?,?,?)", (claim_id, action, self._now(), detail))
 
     def set_state(self, claim_id: int, state: str, note: str = "") -> None:
-        self.db.execute("UPDATE claims SET state=? WHERE id=?",
-                        (state, claim_id))
-        self._journal(claim_id, state, note)
-        self.db.commit()
+        with self._tx():
+            self.db.execute("UPDATE claims SET state=? WHERE id=?",
+                            (state, claim_id))
+            self._journal(claim_id, state, note)
 
     def accept(self, claim_id: int, note: str = "") -> None:
         self.set_state(claim_id, ACCEPTED, note)
@@ -160,16 +249,30 @@ class Codex:
         `reconsider`: knowing that the sword USED to be bronze is the
         entire basis for finding the four passages that still say so.
         """
-        new_claim.state = ACCEPTED
-        added = self.add(new_claim, dedupe=False)
-        self.db.execute(
-            "UPDATE claims SET state=?, superseded_by=? WHERE id=?",
-            (SUPERSEDED, added.id, old_id))
-        self._journal(old_id, "superseded", note or f"by #{added.id}")
-        self._journal(added.id, "accepted", note)
-        self.db.execute("UPDATE claims SET state=? WHERE id=?",
-                        (ACCEPTED, added.id))
-        self.db.commit()
+        with self._tx():
+            old = self.get(old_id)
+            #: Two holes closed 2026-10-28. `supersede(99999, …)` used to
+            #: create an accepted claim and journal a row for a claim that
+            #: does not exist; superseding a REJECTED claim flipped it to
+            #: superseded, which sent `reconsider` hunting the manuscript for
+            #: a value the author had already said was never right.
+            if old is None:
+                raise ValueError(f"no claim #{old_id}")
+            if old.state not in (ACCEPTED, PROPOSED):
+                raise ValueError(
+                    f"claim #{old_id} is {old.state} — only a standing claim "
+                    f"can be superseded; a rejected or already superseded "
+                    f"one is not the current fact")
+            new_claim.state = PROPOSED
+            added = self._insert(new_claim)
+            self.db.execute(
+                "UPDATE claims SET state=?, superseded_by=? WHERE id=?",
+                (SUPERSEDED, added.id, old_id))
+            self._journal(old_id, "superseded", note or f"by #{added.id}")
+            self._journal(added.id, "accepted", note)
+            self.db.execute("UPDATE claims SET state=? WHERE id=?",
+                            (ACCEPTED, added.id))
+        added.state = ACCEPTED
         return added
 
     # -- the author's own hand ---------------------------------------------
@@ -208,10 +311,12 @@ class Codex:
         """
         claim.origin = "author"
         claim.state = PROPOSED
-        added = self.add(claim, dedupe=False)
-        if accept:
-            self.accept(added.id, note or "written and accepted by the author")
-            added.state = ACCEPTED
+        with self._tx():
+            added = self._insert(claim)
+            if accept:
+                self.accept(added.id,
+                            note or "written and accepted by the author")
+                added.state = ACCEPTED
         return added
 
     def revise(self, claim_id: int, *, subject: str | None = None,
@@ -231,6 +336,16 @@ class Codex:
         """
         from . import claims as _claims
 
+        with self._tx():
+            return self._revise(_claims, claim_id, subject, predicate, value,
+                                kind, note)
+
+    def _revise(self, _claims, claim_id, subject, predicate, value, kind,
+                note) -> Claim:
+        # Inside one transaction, under the lock, and the UPDATE is guarded
+        # by the state as well: checked outside it, another thread could
+        # accept the claim in between and this would edit an ACCEPTED
+        # claim in place.
         current = self.get(claim_id)
         if current is None:
             raise ValueError(f"no claim #{claim_id}")
@@ -252,15 +367,18 @@ class Codex:
             source_ref=current.source_ref, section_id=current.section_id,
             quote=current.quote, origin=current.origin,
             note=current.note if note is None else note)
-        self.db.execute(
+        changed = self.db.execute(
             "UPDATE claims SET subject=?, kind=?, predicate=?, value=?, "
-            "unit=?, number=?, note=?, key=? WHERE id=?",
+            "unit=?, number=?, note=?, key=? WHERE id=? AND state=?",
             (fresh.subject, fresh.kind, fresh.predicate, fresh.value,
-             fresh.unit, fresh.number, fresh.note, fresh.key, claim_id))
+             fresh.unit, fresh.number, fresh.note, fresh.key, claim_id,
+             PROPOSED)).rowcount
+        if changed != 1:
+            raise ValueError(f"claim #{claim_id} was decided while it was "
+                             f"being revised; nothing was changed")
         self._journal(claim_id, "revised",
                       f"{current.subject}: {current.predicate} = "
                       f"{current.value}")
-        self.db.commit()
         fresh.id = claim_id
         fresh.state = PROPOSED
         return fresh
@@ -283,43 +401,115 @@ class Codex:
         the document is recorded as saying, which is the one edit this
         store must not offer.
         """
-        old = self.get(old_id)
-        if old is None:
-            raise ValueError(f"no claim #{old_id}")
-        if not new_claim.span and old.span:
-            new_claim.span = old.span
-        for field in ("source_ref", "section_id", "quote"):
-            if not getattr(new_claim, field, ""):
-                setattr(new_claim, field, getattr(old, field, ""))
-        new_claim.origin = "author"
-        new_claim.state = PROPOSED
-        added = self.add(new_claim, dedupe=False)
-        #: An accepted claim's correction is accepted: the author is not
-        #: proposing a reading, they are asserting the right one in place
-        #: of a wrong one they had already agreed to. A proposed claim's
-        #: correction stays proposed, and would normally have gone through
-        #: `revise` instead.
-        if old.state in (ACCEPTED, SUPERSEDED):
-            self.accept(added.id, note or f"corrects #{old_id}")
-            added.state = ACCEPTED
-        self.db.execute(
-            "UPDATE claims SET state=?, replaced_by=? WHERE id=?",
-            (REJECTED, added.id, old_id))
-        self._journal(old_id, "corrected",
-                      note or f"was “{old.subject}: {old.predicate} = "
-                              f"{old.value}”; replaced by #{added.id}")
-        self.db.commit()
+        with self._tx():
+            old = self.get(old_id)
+            if old is None:
+                raise ValueError(f"no claim #{old_id}")
+            if old.state == REJECTED:
+                raise ValueError(
+                    f"claim #{old_id} is already rejected — there is no "
+                    f"standing reading left to correct")
+            if not new_claim.span and old.span:
+                new_claim.span = old.span
+            for field in ("source_ref", "section_id", "quote"):
+                if not getattr(new_claim, field, ""):
+                    setattr(new_claim, field, getattr(old, field, ""))
+            new_claim.origin = "author"
+            new_claim.state = PROPOSED
+            added = self._insert(new_claim)
+            #: An accepted claim's correction is accepted: the author is
+            #: not proposing a reading, they are asserting the right one in
+            #: place of a wrong one they had already agreed to. A proposed
+            #: claim's correction stays proposed, and would normally have
+            #: gone through `revise` instead.
+            #:
+            #: A SUPERSEDED claim's correction is SUPERSEDED, by the same
+            #: successor. It used to be accepted, which left two accepted
+            #: values for one fact — bronze → steel by supersession, then
+            #: "bronze was really brass" made brass AND steel current. The
+            #: correction fixes history; it does not bring it back.
+            if old.state == ACCEPTED:
+                self.accept(added.id, note or f"corrects #{old_id}")
+                added.state = ACCEPTED
+            elif old.state == SUPERSEDED:
+                self.db.execute(
+                    "UPDATE claims SET state=?, superseded_by=? WHERE id=?",
+                    (SUPERSEDED, old.superseded_by, added.id))
+                self._journal(added.id, "superseded",
+                              f"corrects #{old_id}, which #"
+                              f"{old.superseded_by} had superseded")
+                added.state = SUPERSEDED
+                added.superseded_by = old.superseded_by
+            self.db.execute(
+                "UPDATE claims SET state=?, replaced_by=? WHERE id=?",
+                (REJECTED, added.id, old_id))
+            self._journal(old_id, "corrected",
+                          note or f"was “{old.subject}: {old.predicate} = "
+                                  f"{old.value}”; replaced by #{added.id}")
         return added
 
-    def add_many(self, claims: list[Claim]) -> list[Claim]:
-        return [self.add(c) for c in claims]
+    def add_many(self, claims: list[Claim], *,
+                 new_only: bool = False) -> list[Claim]:
+        """Every claim, as stored — or with `new_only`, just the ones this
+        call created. One transaction for the batch: a thousand claims is
+        one commit, not a thousand fsyncs.
+
+        `new_only` exists because callers reported `len(add_many(...))` as
+        "N claims proposed", and on a second pass over an unchanged book
+        that number counted everything already in the Codex."""
+        out: list[Claim] = []
+        with self._tx():
+            for claim in claims:
+                stored, created = self._add(claim)
+                if created or not new_only:
+                    out.append(stored)
+        return out
+
+    def for_sweep(self, read: list[Claim], *,
+                  include_accepted: bool = True) -> list[Claim]:
+        """Claims read out of the manuscript, as THE AUTHOR has left them.
+
+        A continuity sweep used to compare the fresh deterministic reading
+        of the book and nothing else, so a conflict the author had REJECTED
+        ("that 45 Nm is the old figure, ignore it") was printed again on
+        every run. Here each fresh reading is matched to its stored self:
+        rejected readings drop out, decided ones carry their state, and —
+        with `include_accepted` — everything the author has accepted joins
+        in once.
+
+        A SUPERSEDED reading stays in, as the fresh reading it is. The
+        author changed the fact (bronze → steel); a passage that still says
+        bronze is exactly the continuity error the sweep exists to find,
+        and dropping it left that to Reconsider alone.
+        """
+        out: list[Claim] = []
+        ids: set[int] = set()
+        with self._lock:
+            for claim in read:
+                stored = self._find_same(claim)
+                if stored is None:
+                    out.append(claim)
+                    continue
+                if stored.state == REJECTED:
+                    continue
+                if stored.state == SUPERSEDED:
+                    out.append(claim)
+                    continue
+                if stored.id not in ids:
+                    ids.add(stored.id)
+                    out.append(stored)
+            if include_accepted:
+                for claim in self.all(state=ACCEPTED):
+                    if claim.id not in ids:
+                        ids.add(claim.id)
+                        out.append(claim)
+        return out
 
     # -- reading ----------------------------------------------------------
 
     def get(self, claim_id: int) -> Claim | None:
-        row = self.db.execute("SELECT * FROM claims WHERE id=?",
-                              (claim_id,)).fetchone()
-        return _to_claim(row) if row else None
+        rows = self._read("SELECT * FROM claims WHERE id=?", (claim_id,))
+        return _to_claim(rows[0]) if rows else None
 
     def all(self, state: str | None = None,
             kind: str | None = None) -> list[Claim]:
@@ -335,7 +525,7 @@ class Codex:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id"
-        return [_to_claim(r) for r in self.db.execute(sql, args)]
+        return [_to_claim(r) for r in self._read(sql, args)]
 
     def about(self, subject: str, include_superseded: bool = True
               ) -> list[Claim]:
@@ -343,10 +533,10 @@ class Codex:
         if not include_superseded:
             sql += f" AND state != '{SUPERSEDED}'"
         return [_to_claim(r) for r in
-                self.db.execute(sql + " ORDER BY id", (subject,))]
+                self._read(sql + " ORDER BY id", (subject,))]
 
     def by_key(self, key: str) -> list[Claim]:
-        return [_to_claim(r) for r in self.db.execute(
+        return [_to_claim(r) for r in self._read(
             "SELECT * FROM claims WHERE key=? ORDER BY id", (key,))]
 
     def governing(self, section_id: str, subjects: list[str] | None = None,
@@ -385,7 +575,7 @@ class Codex:
         return [c for _s, c in scored[:limit]]
 
     def counts(self) -> dict:
-        rows = self.db.execute(
+        rows = self._read(
             "SELECT state, COUNT(*) n FROM claims GROUP BY state")
         out = dict.fromkeys((PROPOSED, ACCEPTED, REJECTED, SUPERSEDED), 0)
         for row in rows:
@@ -393,7 +583,7 @@ class Codex:
         return out
 
     def history(self, claim_id: int) -> list[tuple[str, str, str]]:
-        return [(r["action"], r["at"], r["detail"]) for r in self.db.execute(
+        return [(r["action"], r["at"], r["detail"]) for r in self._read(
             "SELECT * FROM journal WHERE claim_id=? ORDER BY id",
             (claim_id,))]
 
@@ -421,6 +611,18 @@ class Codex:
             if limit and sent >= limit:
                 break
         return sent
+
+
+def _quote_key(quote: str) -> str:
+    """A quote's identity, blind to whitespace and typographic quotes —
+    the same sentence re-read after a re-wrap is the same sentence."""
+    text = " ".join((quote or "").split()).lower()
+    for a, b in (("\u2019", "'"), ("\u2018", "'"), ("\u201c", '"'),
+                 ("\u201d", '"'), ("\u2014", "-"), ("\u2013", "-")):
+        text = text.replace(a, b)
+    if not text:
+        return ""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
 def _to_claim(row: sqlite3.Row) -> Claim:

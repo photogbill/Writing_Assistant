@@ -130,5 +130,53 @@ class Words(unittest.TestCase):
             self.assertEqual(T.syllables(word), want, word)
 
 
+class MaskingKeepsTheProse(unittest.TestCase):
+    """2026-10-28: each of these used to blank real prose, silently."""
+
+    def test_a_tilde_scene_break_is_not_a_code_fence(self):
+        text = "She left.\n\n~~~\n\nHe stayed by the door until dawn."
+        self.assertIn("He stayed by the door until dawn.",
+                      " ".join(T.prose_of(text).split()))
+
+    def test_two_tilde_breaks_do_not_swallow_the_scene_between(self):
+        text = "A one.\n\n~~~\n\nB two.\n\n~~~\n\nC three."
+        self.assertEqual(" ".join(T.prose_of(text).split()),
+                         "A one. B two. C three.")
+
+    def test_a_real_tilde_fence_is_still_code(self):
+        text = "Text.\n\n~~~python\nx = 1\n~~~\n\nMore."
+        self.assertNotIn("x = 1", T.prose_of(text))
+
+    def test_an_unclosed_fence_does_not_eat_the_rest_of_the_file(self):
+        text = "Text.\n\n```\n\nStill prose here."
+        self.assertIn("Still prose here.", T.prose_of(text))
+
+    def test_a_code_span_does_not_cross_a_blank_line(self):
+        text = ("It was `odd, she thought.\n\nHe said nothing for a long "
+                "while, and then `he` left.")
+        self.assertIn("He said nothing for a long while",
+                      " ".join(T.prose_of(text).split()))
+
+    def test_angle_bracket_speech_is_prose_and_html_is_not(self):
+        text = "<Where are you?> the voice asked. A <b>bold</b> word."
+        out = " ".join(T.prose_of(text).split())
+        self.assertIn("<Where are you?>", out)
+        self.assertNotIn("<b>", out)
+
+
+    def test_single_letter_tag_names_do_not_eat_a_thought(self):
+        """Found by the independent check: `<I love you>` matched the tag
+        `i` followed by "attributes"."""
+        for text in ("<I love you> she thought.", "<A ship comes> it said."):
+            self.assertIn(text.split(">")[0] + ">",
+                          " ".join(T.prose_of(text).split()))
+        self.assertNotIn("href", T.prose_of('<a href="x">link</a>'))
+
+    def test_tex_quotes_do_not_open_a_code_span(self):
+        text = "He typed ``hello'' and then `ls` and left."
+        out = " ".join(T.prose_of(text).split())
+        self.assertIn("hello'' and then", out)
+        self.assertNotIn("ls", out.split())
+
 if __name__ == "__main__":
     unittest.main()

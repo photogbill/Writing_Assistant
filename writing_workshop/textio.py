@@ -125,7 +125,22 @@ def scan_blocks(text: str) -> list[Block]:
             j = i + 1
             while j < n and not lines[j][1].lstrip().startswith(token):
                 j += 1
-            end = (lines[j][0] + len(lines[j][1])) if j < n else len(text)
+            #: A SCENE BREAK IS NOT A CODE FENCE (2026-10-28). A bare
+            #: `~~~` with a blank line on each side is how a great many
+            #: novelists mark a scene break — and it opened a "code block"
+            #: that ran to the next `~~~` or to the end of the file, so the
+            #: rest of the chapter vanished from every measurement, with
+            #: nothing said. And a fence that never closes is not code
+            #: either: it is a stray line, and the prose after it is prose.
+            lone_tildes = (bare.strip("~") == "" and
+                           (i == 0 or not lines[i - 1][1].strip()) and
+                           (i + 1 >= n or not lines[i + 1][1].strip()))
+            if lone_tildes or j >= n:
+                blocks.append(Block(RULE, start, start + len(stripped),
+                                    bare, line=i + 1))
+                i += 1
+                continue
+            end = lines[j][0] + len(lines[j][1])
             blocks.append(Block(CODE, start, end, text[start:end],
                                 line=i + 1))
             i = j + 1
@@ -222,6 +237,43 @@ def scan_blocks(text: str) -> list[Block]:
     return blocks
 
 
+_NUMBER_WORD = (r"(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|"
+                r"ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|"
+                r"nine))?|one|two|three|four|five|six|seven|eight|nine|ten|"
+                r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                r"eighteen|nineteen|hundred)")
+#: A line that is a chapter heading in a plain-text manuscript: `CHAPTER 1`,
+#: `Chapter Seven: The Road`, `PART II`, `Prologue`. The number (or nothing,
+#: for the named ones) must END the line or be followed by a separator, so
+#: "Chapter one was the hardest to write." stays a sentence.
+_PLAIN_HEADING = re.compile(
+    r"^(?:(?:chapter|part|book|act)\s+(?:\d+|[ivxlcdm]+|" + _NUMBER_WORD +
+    r")|prologue|epilogue|interlude|afterword|foreword)"
+    r"(?:\s*[:.\u2014\u2013-]\s*\S.{0,80})?\s*$", re.IGNORECASE)
+
+
+def plain_headings(text: str, blocks: list[Block]) -> list[Block]:
+    """Promote a plain-text manuscript's chapter lines to headings.
+
+    A `.txt` novel has no `#`. Its chapters are lines reading `CHAPTER 1`,
+    and without this the whole book was ONE section: pacing had one
+    chapter to compare, presence had one column, and neither said why.
+    Only a paragraph that is that one line is promoted — a heading is a
+    line on its own — and only for `.txt`, because a markdown author who
+    wanted a heading typed one.
+    """
+    out = []
+    for block in blocks:
+        if (block.kind == PARA and "\n" not in block.text.strip()
+                and _PLAIN_HEADING.match(block.text.strip())):
+            title = block.text.strip()
+            out.append(Block(HEADING, block.start, block.end, title,
+                             level=1, marker="plain", line=block.line))
+        else:
+            out.append(block)
+    return out
+
+
 def _item_lines(lines: list[tuple[int, str]], i: int) -> int:
     """Index of the first line after a list item and its continuations."""
     j = i + 1
@@ -261,11 +313,35 @@ def step_number(text: str) -> int:
 # masking
 # ---------------------------------------------------------------------------
 
-_INLINE_CODE = re.compile(r"`+[^`]*`+")
+#: A code span opens and closes with the SAME run of backticks and never
+#: crosses a blank line. `` `+[^`]*`+ `` did both, so one stray backtick in
+#: a paragraph blanked everything up to the next one, pages later, and
+#: LaTeX-style ``quotes'' did the same.
+#: The opening run must be a WHOLE run — `(?<!`)` — or TeX quotes
+#: (``hello'') opened "code" at their second backtick and blanked the
+#: prose up to the next real `code`.
+_INLINE_CODE = re.compile(r"(?<!`)(`+)(?:(?!\n[ \t]*\n)[^`])+?(?<!`)\1(?!`)")
 _LINK = re.compile(r"(!?)\[([^\]]*)\]\(([^)]*)\)")
 _AUTOLINK = re.compile(r"<https?://[^>]*>")
 _HTML = re.compile(r"<!--.*?-->", re.S)
-_TAG = re.compile(r"</?[A-Za-z][^>]*>")
+#: Real HTML only. `</?[A-Za-z][^>]*>` blanked `<Where are you?>` — the
+#: way a lot of fiction sets telepathic or machine speech — and a manual's
+#: `<Enter>`.
+_HTML_TAGS = (
+    "a|abbr|address|article|aside|audio|b|bdi|bdo|blockquote|body|br|"
+    "button|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|"
+    "dl|dt|em|figcaption|figure|font|footer|form|h[1-6]|head|header|hr|"
+    "html|i|iframe|img|input|ins|kbd|label|li|link|main|mark|meta|nav|ol|"
+    "option|p|picture|pre|q|s|samp|script|section|select|small|source|"
+    "span|strike|strong|style|sub|summary|sup|table|tbody|td|textarea|"
+    "tfoot|th|thead|time|title|tr|u|ul|var|video|wbr")
+#: Attributes must LOOK like attributes (`name=value`): `<i>` and
+#: `<a href="x">` are tags, `<I love you>` and `<A ship comes>` are a
+#: character's thought — the single-letter tag names i, a, b, s, u, q and
+#: p followed by any words used to blank them.
+_ATTR = r"""(?:\s+[\w:.-]+\s*=\s*(?:"[^"<>]*"|'[^'<>]*'|[^\s"'<>=`]+))"""
+_TAG = re.compile(r"</?(?:" + _HTML_TAGS + r")\b" + _ATTR + r"*\s*/?>",
+                  re.I)
 _EMPH = re.compile(r"(\*{1,3}|_{1,3})")
 
 

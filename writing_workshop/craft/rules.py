@@ -28,8 +28,17 @@ def _scoped(ctx: Ctx, src, scope: str) -> list[tuple[int, int, str]]:
     if scope == "prose":
         return [(0, len(prose), prose)]
     if scope == "headings":
-        return [(b.start, b.end, b.text) for b in src.blocks
-                if b.kind == T.HEADING]
+        # `b.text` is the heading WITHOUT its `## ` marker, so its offsets
+        # start after the marker, not at `b.start`. Using `b.start` put
+        # every headings-scope hit three characters early in the file.
+        out = []
+        for b in src.blocks:
+            if b.kind != T.HEADING:
+                continue
+            at = src.text.find(b.text, b.start, b.end) if b.text else -1
+            start = at if at >= 0 else b.start
+            out.append((start, start + len(b.text), b.text))
+        return out
     if scope == "steps":
         out = []
         for block in src.blocks:

@@ -128,5 +128,68 @@ class Registry(unittest.TestCase):
         self.assertIn("units", report.ran)
 
 
+class TheChecksThatUsedToCryWolf(unittest.TestCase):
+    """2026-10-28. False positives are the most expensive thing a check can
+    produce: an author switches a noisy check off and loses the real
+    findings with the noise."""
+
+    def _run(self, text, only):
+        import tempfile
+        from pathlib import Path
+        from writing_workshop import Project
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.md").write_text(text, encoding="utf-8")
+            project = Project.open(tmp)
+            return run(project.manuscript(), TECHNICAL,
+                       profile=project.profile(), only=only)
+
+    def test_a_plural_is_not_a_cross_reference(self):
+        report = self._run(
+            "# 1 Pump\n\nThe following sections describe the pump. All "
+            "figures are drawn to scale, the tables list the parts, and "
+            "this is the section a reader needs. The part I liked.\n\n"
+            "See Section 1.\n", ["xrefs"])
+        self.assertEqual(report.findings, [])
+
+    def test_a_derived_number_does_not_hide_a_dead_reference(self):
+        report = self._run(
+            "# Preface\n\nHello.\n\n# Safety\n\nCare.\n\n"
+            "# 3 Service\n\nSee Section 5.\n", ["xrefs"])
+        self.assertEqual([f.title for f in report.findings],
+                         ["“Section 5” does not resolve"])
+
+    def test_two_supplies_are_two_quantities(self):
+        report = self._run(
+            "# 1 Power\n\nThe logic supply is 3.3 V and the main supply "
+            "is 12 V.\n\n# 2 Wheels\n\nTighten the wheel nuts to 110 Nm."
+            "\n\n# 3 Plugs\n\nTighten the spark plugs to 25 Nm.\n",
+            ["units"])
+        self.assertEqual([f for f in report.findings
+                          if f.severity == DEFECT], [])
+
+    def test_mm_and_m_are_not_two_spellings(self):
+        report = self._run(
+            "# 1\n\nThe gap is 2 mm. The gap is 3 mm. The gap is 4 mm. "
+            "The cable length is 2 m.\n", ["units"])
+        self.assertFalse([f for f in report.findings
+                          if "written several ways" in f.title])
+
+    def test_milli_and_mega_are_not_the_same_unit(self):
+        from writing_workshop import units as U
+        self.assertFalse(U.conflict("1", "MW", "1000", "kW"))
+        self.assertTrue(U.conflict("10", "mW", "10", "MW"))
+        self.assertTrue(U.conflict("3", "V", "3.3", "V"))
+        self.assertFalse(U.conflict("40", "Nm", "29.5", "lb-ft"))
+        self.assertFalse(U.conflict("10–20", "Nm", "15", "Nm"))
+        self.assertTrue(U.conflict("10–20", "Nm", "25", "Nm"))
+
+    def test_a_sign_and_an_ohm_are_read(self):
+        from writing_workshop import units as U
+        self.assertEqual(U.split_value("below -40 °C"), ("-40", "°C"))
+        self.assertEqual(U.split_value("a 10 kΩ resistor"), ("10", "kΩ"))
+        self.assertEqual(U.split_value("steps 1 to 5 in order"), ("1", ""))
+        self.assertEqual(U.split_value("take 5 a day"), ("5", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

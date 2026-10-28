@@ -134,10 +134,21 @@ def measure(text: str) -> dict[str, float]:
         "article_openings": opens / len(spans),
         "similes": len(_SIMILE.findall(text)) * per_1000,
         "dialogue": quoted / n_words,
-        # Carried so `score` can tell a voice from a coin flip. Not a
-        # metric: it never appears in METRICS and is never fitted.
+        # Carried so `score` can tell a voice from a coin flip. Not
+        # metrics: they never appear in METRICS and are never fitted.
         "_words": float(n_words),
+        "_sentences": float(len(lengths)),
     }
+
+
+#: Metrics that describe a DISTRIBUTION over sentences, and so say nothing
+#: about a text with too few of them. One sentence has a length spread of
+#: exactly 0 — so every one-sentence suggestion used to read as "flatter
+#: than you", and scored past the threshold on that alone.
+NEEDS_SENTENCES = {"sentence_spread": 3, "article_openings": 3,
+                   "subordination": 2}
+#: MATTR's window is 50 words; below that it is measuring the text's length.
+NEEDS_WORDS = {"ttr": 50}
 
 
 def mattr(tokens: list[str], window: int = 50) -> float:
@@ -233,6 +244,10 @@ def score(fp: Fingerprint, text: str) -> list[Drift]:
     for key, label, up, down in METRICS:
         if key not in row or key not in fp.metrics:
             continue
+        if row.get("_sentences", 99) < NEEDS_SENTENCES.get(key, 0):
+            continue
+        if row.get("_words", 999) < NEEDS_WORDS.get(key, 0):
+            continue
         base = fp.metrics[key]
         sd = fp.spread.get(key, 0.0)
         value = row[key]
@@ -276,13 +291,21 @@ def score(fp: Fingerprint, text: str) -> list[Drift]:
 def drift_score(drifts: list[Drift]) -> float:
     """One number to put beside a suggestion. Quiet, per decision 4.
 
-    Root-mean-square of the notable z-scores. 0 is "sounds like you";
+    Root-mean-square of EVERY measured z-score. 0 is "sounds like you";
     above about 1.5 is "this does not".
+
+    IT WAS THE RMS OF ONLY THE NOTABLE ONES until 2026-10-28 — so the
+    moment any one of twelve metrics crossed 1.5, the whole score was at
+    least 1.5. With a dozen metrics one of them nearly always does by
+    chance: fitted on 20,000 words and scored on its OWN windows, two
+    thirds of the author's writing read as "not you". A number that calls
+    the author's own prose a stranger's teaches them to ignore it. Which
+    metrics moved is still said, by `describe`; this is the overall size.
     """
-    notable = [d.z for d in drifts if d.notable] or [d.z for d in drifts]
-    if not notable:
+    measured = [d.z for d in drifts]
+    if not measured:
         return 0.0
-    return round((sum(z * z for z in notable) / len(notable)) ** 0.5, 2)
+    return round((sum(z * z for z in measured) / len(measured)) ** 0.5, 2)
 
 
 def describe(fp: Fingerprint, drifts: list[Drift], limit: int = 3) -> str:
@@ -414,7 +437,7 @@ def load(path: str | Path) -> Fingerprint | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return None
     return Fingerprint(metrics=data.get("metrics") or {},

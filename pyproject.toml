@@ -54,8 +54,10 @@ all  = ["writing-workshop[docx,dev]"]
 workshop = "writing_workshop.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/photogbill/Writing-Workshop"
-Source   = "https://github.com/photogbill/Writing-Workshop"
+# The repository is `Writing_Assistant`. `Writing-Workshop` never existed;
+# ATK's `get_engines.bat` was corrected on 2026-08-30 and this was not.
+Homepage = "https://github.com/photogbill/Writing_Assistant"
+Source   = "https://github.com/photogbill/Writing_Assistant"
 
 [tool.setuptools]
 # `adapters/` is deliberately OUTSIDE the package. ATK's adapter imports
@@ -96,6 +98,12 @@ skip-magic-trailing-comma = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+#: The tests do `from _base import ...` -- written for `unittest discover
+#: -s tests`, which puts tests/ on the path. pytest does not, because
+#: tests/ is a package, so it collected NOTHING: seventeen collection
+#: errors and a green-looking exit for nobody who read them. This is the
+#: one line that makes `_base.py`'s "runs under both runners" true.
+pythonpath = ["tests"]
 addopts = "-ra --strict-markers"
 markers = ["slow: takes more than a second",
            "needs_model: needs a language model the CI box does not have"]

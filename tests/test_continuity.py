@@ -159,5 +159,47 @@ class Sweep(unittest.TestCase):
         self.assertEqual(len(got), len(doc.sections) - 1)
 
 
+class NamesAreNotTheCalendar(unittest.TestCase):
+    """2026-10-28: on a 150,000-word book the cast detector proposed
+    Tuesday, Thursday, Monday and Friday as characters, and the thread
+    finder tracked `Then Mira`, `When Mira` and `Tuesday Mira` — which
+    name drift then proposed as one person spelt two ways."""
+
+    def _doc(self, paras):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        (Path(self._tmp.name) / "01.md").write_text(
+            "# One\n\n" + "\n\n".join(paras) + "\n", encoding="utf-8")
+        return Manuscript.load(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_weekdays_are_dates_and_april_is_a_person(self):
+        from writing_workshop import cast as C
+        doc = self._doc(
+            ["On Tuesday Mira rode north, and on Thursday she came back. "
+             "By Monday the river was up; on Friday it fell."] * 3
+            + ["April laughed at her. Mira looked at April, and April "
+               "looked away. Then April said nothing."] * 2)
+        found = C.detect(doc, minimum=3)
+        self.assertIn("April", found)
+        self.assertIn("Mira", found)
+        for day in ("Tuesday", "Thursday", "Monday", "Friday"):
+            self.assertNotIn(day, found)
+
+    def test_a_sentence_opener_is_not_half_of_a_name(self):
+        from writing_workshop.continuity import namedrift as ND
+        from writing_workshop.continuity import threads as TH
+        doc = self._doc(
+            ["Then Mira left the hall. When Mira returned, Aleksandr was "
+             "gone. After Mira read it, Mira burned it. On Tuesday Mira "
+             "rode north."] * 3)
+        names = TH.candidates(doc, [], [])
+        self.assertEqual(sorted(names), ["Aleksandr", "Mira"])
+        self.assertEqual(ND.find(doc, names), [])
+
+
 if __name__ == "__main__":
     unittest.main()

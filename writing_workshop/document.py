@@ -45,8 +45,87 @@ SUFFIXES = (".md", ".markdown", ".txt", *F.DERIVED_SUFFIXES)
 SKIP_DIRS = {".workshop", ".git", "__pycache__", "_to_delete", "backups",
              "node_modules", ".venv", "exports", "audio"}
 
+#: Files a HOST writes beside the chapters that are never the book.
+#:
+#: 2026-10-28: ATK's drafting kept the model's reasoning in
+#: `NN-title.thinking.md` beside each chapter, and every one of them was
+#: read back in as a chapter — measured, mined for claims, and exported in
+#: the Shunn manuscript as "Thinking — Chapter 1". New sidecars live under
+#: `.workshop/` now; this keeps the ones already on disk out of the book.
+SIDECAR_SUFFIXES = (".thinking.md",)
+
+
+def is_sidecar(path: str | Path) -> bool:
+    name = Path(path).name.lower()
+    return any(name.endswith(s) for s in SIDECAR_SUFFIXES)
+
+
+def decode(raw: bytes) -> tuple[str, str, str]:
+    """`(text, encoding, note)` for a manuscript file's bytes.
+
+    Four Windows realities, each of which used to read wrongly AND
+    silently (2026-10-28):
+
+    * **UTF-8 with a BOM** (Notepad's default for years, PowerShell 5) —
+      the BOM stuck to the first heading, so `# Chapter One` stopped being
+      a heading.
+    * **UTF-16** (Notepad's "Unicode") — decoded as cp1252 garbage, one
+      letter per "word".
+    * **One stray Windows byte in a UTF-8 file** — the WHOLE file was
+      re-read as cp1252 and every curly quote became mojibake. Now only the
+      stray byte is replaced, and the note says so.
+    * **A real cp1252 file** — still read, as before, and now named.
+
+    `note` is "" for a clean UTF-8 file and a sentence otherwise, so the
+    host can say what was done (rule 4).
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", errors="replace"), "utf-8-sig", ""
+    # The BYTE ORDER is the encoding's name, not "utf-16": writing with
+    # plain "utf-16" emits the machine's own order, so a big-endian file
+    # came back little-endian on Save.
+    if raw.startswith(b"\xff\xfe"):
+        return (raw[2:].decode("utf-16-le", errors="replace"), "utf-16-le",
+                "read as UTF-16")
+    if raw.startswith(b"\xfe\xff"):
+        return (raw[2:].decode("utf-16-be", errors="replace"), "utf-16-be",
+                "read as UTF-16 (big-endian)")
+    try:
+        return raw.decode("utf-8"), "utf-8", ""
+    except UnicodeDecodeError:
+        pass
+    as_utf8 = raw.decode("utf-8", errors="replace")
+    bad = as_utf8.count("\ufffd")
+    good = sum(1 for ch in as_utf8 if ord(ch) > 0x7F and ch != "\ufffd")
+    if good > bad:
+        return (as_utf8, "utf-8",
+                f"{bad} byte(s) were not valid UTF-8 and were replaced")
+    return (raw.decode("cp1252", errors="replace"), "cp1252",
+            "read as Windows-1252 (cp1252)")
+
+
+def newline_of(text) -> str:
+    """The line ending a file was written with, so a host can write it
+    back the same way instead of converting every line on Save.
+
+    Give it the DECODED text. Bytes are accepted and decoded first: in
+    UTF-16 a CRLF is `\\r\\x00\\n\\x00`, and counting `b"\\r\\n"` in the raw
+    bytes never found one, so every UTF-16 chapter was saved as LF. A file
+    of lone `\\r` (classic Mac) is `"\\r"`. Mixed endings get the majority.
+    """
+    if isinstance(text, (bytes, bytearray)):
+        text = decode(bytes(text))[0]
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    cr = text.count("\r") - crlf
+    if cr > max(lf, crlf):
+        return "\r"
+    return "\r\n" if crlf and crlf >= lf else "\n"
+
+
 _NUMBERED = re.compile(r"^\s*((?:\d+|[A-Z])(?:\.\d+)*)[.)]?\s+(.*)$")
-_SCENE_BREAK = re.compile(r"^\s*(\*\s*\*\s*\*|#\s*#\s*#|---|\* \* \*|#)\s*$")
+_SCENE_BREAK = re.compile(
+    r"^\s*(\*\s*\*\s*\*|#\s*#\s*#|---|\* \* \*|#|~~~+)\s*$")
 
 
 def _natural(name: str) -> tuple:
@@ -68,6 +147,13 @@ class SourceFile:
     #: "the source is the truth, not the render" are false here, because
     #: for a Word document the render owns the numbering.
     derived: bool = False
+    #: How the bytes were read, so the one host widget that writes a file
+    #: back (the author's Save) can keep the encoding and line endings it
+    #: found. "" for a derived file.
+    encoding: str = "utf-8"
+    newline: str = "\n"
+    #: A sentence when the read was not a clean UTF-8 one; see `decode`.
+    note: str = ""
 
     @property
     def stem(self) -> str:
@@ -101,10 +187,14 @@ class Manuscript:
     _sec_at: dict[str, tuple[list[int], list[Section]]] = field(
         default_factory=dict)
     _found: dict[tuple[str, bool], list[Span]] = field(default_factory=dict)
+    _by_rel: dict[str, SourceFile] = field(default_factory=dict)
+    _starts: dict[str, list[int]] = field(default_factory=dict)
     #: (path, why) for every file that could not be read. Never raised:
     #: one bad file must not cost the author the other thirty-nine, and
     #: rule 4 says the report has to name what was not done.
     unreadable: list[tuple[str, str]] = field(default_factory=list)
+    #: Host sidecars found among the chapters and left out of the book.
+    sidecars: list[str] = field(default_factory=list)
 
     # -- loading ----------------------------------------------------------
 
@@ -131,7 +221,12 @@ class Manuscript:
                                     p.relative_to(root).parts))
         doc = cls(root=base)
         for path in paths:
+            if is_sidecar(path) and not root.is_file():
+                doc.sidecars.append(str(path.relative_to(root))
+                                    .replace("\\", "/"))
+                continue
             derived = F.is_derived(path)
+            encoding, newline, note = "", "\n", ""
             if derived:
                 try:
                     text = F.read(path)
@@ -144,18 +239,34 @@ class Manuscript:
                     continue
             else:
                 try:
-                    text = path.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    # A manuscript written on Windows in a previous
-                    # decade. Read it rather than refusing it; the author
-                    # cares about the book, not about its encoding.
-                    text = path.read_text(encoding="cp1252",
-                                          errors="replace")
+                    raw = path.read_bytes()
+                except OSError as exc:
+                    doc.unreadable.append((str(path), str(exc)))
+                    continue
+                # A manuscript written on Windows in a previous decade is
+                # read rather than refused; the author cares about the
+                # book, not about its encoding — but the note says what
+                # was done, because a silent guess is how mojibake gets in.
+                text, encoding, note = decode(raw)
+                newline = newline_of(text)
+                text = text.replace("\r\n", "\n").replace("\r", "\n")
             rel = (path.name if root.is_file()
                    else str(path.relative_to(root)).replace("\\", "/"))
+            blocks = T.scan_blocks(text)
+            prose = T.prose_of(text)
+            if path.suffix.lower() == ".txt":
+                blocks = T.plain_headings(text, blocks)
+                for block in blocks:
+                    if block.kind == T.HEADING and block.marker == "plain":
+                        # Masked like any heading: "CHAPTER 7" is not a
+                        # sentence of the book.
+                        prose = (prose[:block.start]
+                                 + " " * (block.end - block.start)
+                                 + prose[block.end:])
             src = SourceFile(path=path, rel=rel, text=text,
-                             blocks=T.scan_blocks(text), derived=derived)
-            src.prose = T.prose_of(text)
+                             blocks=blocks, derived=derived,
+                             encoding=encoding, newline=newline, note=note)
+            src.prose = prose
             doc.files.append(src)
             doc._prose[rel] = src.prose
         doc._derive_sections()
@@ -171,7 +282,13 @@ class Manuscript:
             heads = [b for b in src.blocks if b.kind == T.HEADING]
             spans: list[tuple[T.Block | None, int, int]] = []
             first = heads[0].start if heads else len(src.text)
-            lead = src.text[:first]
+            # Judged on the MASKED prose when there are headings: YAML
+            # front matter above the first one made a 0-word phantom
+            # chapter per file, named after the file. A file with NO
+            # heading is still one section whatever it holds, or a file
+            # that is all table could not even be opened from the tree.
+            lead = (self._prose.get(src.rel, src.text) if heads
+                    else src.text)[:first]
             if lead.strip():
                 # Prose before the first heading is a section too. Skipping
                 # it is how a whole chapter written without a title becomes
@@ -220,10 +337,28 @@ class Manuscript:
         return self._by_id.get(sid)
 
     def file(self, rel: str) -> SourceFile | None:
-        for src in self.files:
-            if src.rel == rel:
-                return src
-        return None
+        if len(self._by_rel) != len(self.files):
+            self._by_rel = {src.rel: src for src in self.files}
+        return self._by_rel.get(rel)
+
+    def blocks_in(self, sec: Section) -> list[T.Block]:
+        """The blocks that START inside a section's body — a bisect.
+
+        Every per-section loop used to walk every block of the section's
+        FILE, which is quadratic in one big file — and a `.docx` is
+        always one big file: 3,000 sections took 7.9 s in `paragraphs()`
+        and as long again in the definitions check.
+        """
+        src = self.file(sec.path)
+        if src is None:
+            return []
+        starts = self._starts.get(src.rel)
+        if starts is None or len(starts) != len(src.blocks):
+            src.blocks.sort(key=lambda b: b.start)
+            starts = self._starts[src.rel] = [b.start for b in src.blocks]
+        lo = bisect.bisect_left(starts, sec.body.start)
+        hi = bisect.bisect_left(starts, sec.body.end, lo)
+        return src.blocks[lo:hi]
 
     def raw(self, sec: Section) -> str:
         src = self.file(sec.path)
@@ -293,10 +428,8 @@ class Manuscript:
             if not src:
                 continue
             idx = 0
-            for block in src.blocks:
+            for block in self.blocks_in(target):
                 if not block.is_prose:
-                    continue
-                if not (target.body.start <= block.start < target.body.end):
                     continue
                 masked = self._prose[src.rel][block.start:block.end]
                 if not masked.strip():
@@ -318,9 +451,8 @@ class Manuscript:
         src = self.file(sec.path)
         if not src:
             return []
-        marks = [b.start for b in src.blocks
+        marks = [b.start for b in self.blocks_in(sec)
                  if b.kind in (T.RULE, T.PARA)
-                 and sec.body.start <= b.start < sec.body.end
                  and _SCENE_BREAK.match(b.text.strip())]
         edges = [sec.body.start, *marks, sec.body.end]
         spans = []
@@ -357,9 +489,19 @@ class Manuscript:
                 f"in place ({names}"
                 + ("…" if len(derived) > 4 else "")
                 + "). Findings name the section and quote the sentence; "
-                  "they cannot point at a position in a .docx.")
+                  "they cannot point at a position in a .docx. In a .docx, "
+                  + F.NOT_READ + ".")
         for path, why in self.unreadable:
             out.append(f"Could not read {path}: {why}")
+        for src in self.files:
+            if src.note:
+                out.append(f"{src.rel}: {src.note}.")
+        if self.sidecars:
+            names = ", ".join(self.sidecars[:3])
+            out.append(
+                f"{len(self.sidecars)} sidecar file(s) left out of the book "
+                f"({names}" + ("…" if len(self.sidecars) > 3 else "")
+                + "). They hold a model's working notes, not prose.")
         return out
 
     def outline(self, max_level: int = 6) -> list[Section]:

@@ -150,6 +150,25 @@ def checks_for(document_type: str) -> list[Registered]:
 MAX_FINDINGS_PER_CHECK = 100
 
 
+def _name_sections(doc: Manuscript, part: CraftReport) -> None:
+    """Record the section a finding NAMES, so its key keeps it.
+
+    A title like "Flat rhythm in Chapter 3" is about chapter 3, and the
+    digit is the identity, not a count. `findings.key` blanks digits in
+    titles (where counts live), so without this every chapter's flat-rhythm
+    finding shared one key and one dismissal hid them all. Only when the
+    title names the section: a finding that merely starts somewhere keeps
+    a key that survives the text moving between sections.
+    """
+    for finding in part.findings:
+        if not finding.section_id or "section" in finding.data:
+            continue
+        sec = doc.section(finding.section_id)
+        label = doc.label(sec) if sec is not None else ""
+        if label and label in finding.title:
+            finding.data["section"] = label
+
+
 def run(doc: Manuscript, document_type: str = TECHNICAL, *,
         only: list[str] | None = None, cast: list[str] | None = None,
         terms: list[str] | None = None,
@@ -218,6 +237,7 @@ def run(doc: Manuscript, document_type: str = TECHNICAL, *,
                 events.emit("warning", f"{reg.label} did not run: {exc}",
                             check=reg.name)
             continue
+        _name_sections(doc, part)
         _cap(part, reg, cap)
         report.merge(part)
         report.ran.append(reg.name)

@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import re
 
+from .. import textio as T
+
 from ..errors import NoModelError
 from ..ports import NEVER
 from ..types import CLAIM_KINDS, Span
@@ -115,6 +117,12 @@ def parse(raw: str, doc, section) -> list:
         at = _locate(body, quote)
         if at < 0:
             continue
+        if not _quote_carries(quote, value):
+            #: A quote of "." or "the" is IN the section and proves
+            #: nothing — both used to pass, and gave a model's invention a
+            #: source reference that looked authoritative. The quote has to
+            #: be a real stretch of text and has to carry the value.
+            continue
         span = Span(section.path, section.body.start + at,
                     section.body.start + at + len(quote))
         out.append(make(subject, predicate, value, kind=kind, span=span,
@@ -122,6 +130,20 @@ def parse(raw: str, doc, section) -> list:
                         section_id=section.id,
                         quote=" ".join(quote.split()), origin="extracted"))
     return out
+
+
+def _quote_carries(quote: str, value: str) -> bool:
+    words = T.word_list(quote)
+    if len(words) < 3:
+        return False
+    flat = T.normalise(" ".join(quote.split()))
+    if T.normalise(value) in flat:
+        return True
+    numbers = re.findall(r"\d[\d,.]*", value)
+    if numbers:
+        return any(n.rstrip(".,") in quote for n in numbers)
+    tokens = [T.normalise(w) for w in T.word_list(value) if len(w) > 2]
+    return bool(tokens) and any(tok in flat for tok in tokens)
 
 
 def _locate(body: str, quote: str) -> int:

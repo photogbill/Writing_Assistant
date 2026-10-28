@@ -3,17 +3,18 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
-from _base import MANUAL, NOVEL, TempProject
 from pathlib import Path
 
+from _base import MANUAL, NOVEL, TempProject
 from writing_workshop import (ACCEPTED, Manuscript, NUMERIC, PROPOSED,
                               Project, REJECTED, SUPERSEDED)
-
-ROOT = Path(__file__).resolve().parents[1]
 from writing_workshop import codex as CX
 from writing_workshop.ports import FixedClock
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeterministicExtraction(unittest.TestCase):
@@ -21,10 +22,14 @@ class DeterministicExtraction(unittest.TestCase):
         self.doc = Manuscript.load(MANUAL)
 
     def test_named_quantities_become_numeric_claims(self):
+        """Named by what they are OF: `lid bolts: torque = 40 Nm`. Until
+        2026-10-28 the subject was the bare word "torque", so every torque
+        in a manual shared one key."""
         claims = CX.deterministic(self.doc)
-        torque = [c for c in claims if c.subject == "torque"]
+        torque = [c for c in claims if c.predicate == "torque"]
         self.assertEqual(len(torque), 2)
         self.assertTrue(all(c.kind == NUMERIC for c in torque))
+        self.assertEqual({c.subject for c in torque}, {"lid bolts"})
         self.assertEqual({c.value for c in torque}, {"40 Nm", "45 Nm"})
 
     def test_a_number_with_no_quantity_word_is_skipped(self):
@@ -32,7 +37,54 @@ class DeterministicExtraction(unittest.TestCase):
         conflicts that are really parser noise."""
         subjects = {c.subject for c in CX.deterministic(self.doc)}
         self.assertNotIn("", subjects)
-        self.assertTrue(subjects <= {"torque", "voltage"})
+        self.assertTrue(subjects <= {"lid bolts", "supply"}, subjects)
+
+    def test_different_parts_with_different_specs_do_not_conflict(self):
+        """THE FALSE POSITIVE THAT MADE A SERVICE MANUAL UNREADABLE. Wheel
+        nuts at 110 Nm and spark plugs at 25 Nm were a CERTAIN
+        contradiction; so were a 3.3 V logic supply and a 12 V main one."""
+        import tempfile
+        from writing_workshop import continuity as CN
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "m.md").write_text(
+                "## 1 Wheels\n\nTighten the wheel nuts to 110 Nm.\n\n"
+                "## 2 Plugs\n\nThe torque for the spark plugs is 25 Nm.\n\n"
+                "## 3 Power\n\nThe logic supply is 3.3 V and the main "
+                "supply is 12 V.\n\n"
+                "## 4 Appendix\n\nTorque the wheel nuts to 120 Nm.\n",
+                encoding="utf-8")
+            claims = CX.deterministic(Manuscript.load(tmp))
+            conflicts = CN.contradictions.find(claims)
+        self.assertEqual([(c.a.subject, c.a.value, c.b.value)
+                          for c in conflicts],
+                         [("wheel nuts", "110 Nm", "120 Nm")])
+        self.assertTrue(conflicts[0].deterministic)
+
+    def test_a_bare_quantity_across_sections_is_only_a_candidate(self):
+        import tempfile
+        from writing_workshop import continuity as CN
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "m.md").write_text(
+                "## 1 A\n\nThe torque is 40 Nm.\n\n"
+                "## 2 B\n\nThe torque is 45 Nm.\n", encoding="utf-8")
+            conflicts = CN.contradictions.find(
+                CX.deterministic(Manuscript.load(tmp)))
+        self.assertEqual(len(conflicts), 1)
+        self.assertFalse(conflicts[0].deterministic)
+        self.assertIn("OF", conflicts[0].detail)
+
+    def test_the_imperative_a_manual_actually_uses_is_read(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "m.md").write_text(
+                "## 1\n\nTighten the wheel nuts to 110 Nm. Set the supply "
+                "voltage to 12 V. Apply 40 Nm to the lid bolts.\n",
+                encoding="utf-8")
+            got = {(c.subject, c.predicate, c.value)
+                   for c in CX.deterministic(Manuscript.load(tmp))}
+        self.assertEqual(got, {("wheel nuts", "torque", "110 Nm"),
+                               ("supply", "voltage", "12 V"),
+                               ("lid bolts", "torque", "40 Nm")})
 
     def test_source_ref_uses_the_authors_own_numbering(self):
         claim = CX.deterministic(self.doc)[0]
@@ -200,6 +252,296 @@ class ModelProposals(unittest.TestCase):
         from writing_workshop.ports import Host
         with self.assertRaises(NoModelError):
             CX.propose(Host(), self.doc, self.section)
+
+
+class ReadingsThatUsedToBeWrong(unittest.TestCase):
+    """2026-10-28 — each of these was measured wrong before the fix."""
+
+    def _doc(self, text):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        (Path(self._tmp.name) / "c.md").write_text(text, encoding="utf-8")
+        return Manuscript.load(self._tmp.name)
+
+    def tearDown(self):
+        if hasattr(self, "_tmp"):
+            self._tmp.cleanup()
+
+    def test_was_and_the_adjective_form_meet_under_one_predicate(self):
+        doc = self._doc("# One\n\nExcalibur was bronze.\n\n# Two\n\n"
+                        "Mira drew the steel Excalibur from the stone.\n")
+        claims = CX.attribute_claims(doc, ["Excalibur"])
+        self.assertEqual({(c.predicate, c.value) for c in claims},
+                         {("material", "bronze"), ("material", "steel")})
+
+    def test_a_passing_state_is_not_a_fact(self):
+        doc = self._doc("# One\n\nMira was tired. Mira was happy. Mira "
+                        "was in the kitchen. Mira was a soldier.\n")
+        values = {c.value for c in CX.attribute_claims(doc, ["Mira"])}
+        self.assertEqual(values, {"soldier"})
+
+    def test_a_leading_word_does_not_hide_the_subject(self):
+        doc = self._doc("# One\n\nYesterday the sword was steel.\n")
+        claims = CX.attribute_claims(doc, ["sword"])
+        self.assertEqual([(c.subject, c.value) for c in claims],
+                         [("sword", "steel")])
+
+    def test_a_trivial_quote_does_not_pass_the_quote_check(self):
+        doc = self._doc("## 4.2 Lid\n\nThe lid bolts are torqued to 40 Nm. "
+                        "The housing is aluminium.\n")
+        sec = doc.sections[0]
+        raw = json.dumps([
+            {"subject": "lid bolts", "predicate": "torque", "value": "95 Nm",
+             "kind": "numeric", "quote": "."},
+            {"subject": "housing", "predicate": "material",
+             "value": "titanium", "kind": "attribute", "quote": "the"},
+            {"subject": "lid bolts", "predicate": "torque", "value": "40 Nm",
+             "kind": "numeric", "quote": "The lid bolts are torqued to "
+                                         "40 Nm."}])
+        kept = CX.parse(raw, doc, sec)
+        self.assertEqual([c.value for c in kept], ["40 Nm"])
+
+    def test_reconsider_needs_the_same_dimension(self):
+        from writing_workshop.codex import reconsider as RC
+        self.assertTrue(RC._mentions_value("torque it to 40 Nm", "40 Nm"))
+        self.assertFalse(RC._mentions_value("rated for 40 kg", "40 Nm"))
+        self.assertFalse(RC._mentions_value("after 40 s", "40 Nm"))
+
+    def test_reconsider_finds_common_colour_words(self):
+        from writing_workshop.codex import reconsider as RC
+        self.assertTrue(RC._mentions_value("still gold under the dust",
+                                           "gold"))
+
+    def test_a_yes_answer_keeps_its_first_letter(self):
+        from writing_workshop.codex import reconsider as RC
+
+        class LLM:
+            def complete(self, *a, **k):
+                return "Yes — the blade rang like a bell"
+
+        class Host:
+            llm = LLM()
+        claim = CX.make("sword", "material", "bronze")
+        dep = RC.Dependent(span=None, quote="x", strength=1, why="",
+                           section_id="", section_label="")
+        self.assertEqual(RC.ask_model(Host(), claim, "steel", dep),
+                         "the blade rang like a bell")
+
+
+class TheSweepHonoursDecisions(TempProject):
+    def test_a_rejected_conflict_is_not_reported_again(self):
+        from writing_workshop import continuity as CN
+        project = Project.open(self.root)
+        codex = CX.Codex(project.codex_db)
+        try:
+            read = CX.deterministic(Manuscript.load(self.root))
+            stored = codex.add_many(read)
+            before = CN.contradictions.find(codex.for_sweep(read))
+            self.assertTrue(before)
+            wrong = [c for c in stored if c.value == "45 Nm"][0]
+            codex.reject(wrong.id, "the old figure")
+            after = CN.contradictions.find(codex.for_sweep(
+                CX.deterministic(Manuscript.load(self.root))))
+            self.assertFalse([c for c in after
+                              if "45 Nm" in (c.a.value, c.b.value)])
+        finally:
+            codex.close()
+
+
+class TheSweepStillSeesTheOldValue(TempProject):
+    """Found by the independent check: superseded readings were dropped,
+    so a passage still saying the OLD value after the author changed the
+    fact was never reported by the sweep."""
+
+    def test_a_passage_with_a_superseded_value_still_conflicts(self):
+        from writing_workshop import continuity as CN
+        project = Project.open(self.root)
+        codex = CX.Codex(project.codex_db)
+        try:
+            read = CX.deterministic(Manuscript.load(self.root))
+            stored = codex.add_many(read)
+            old = [c for c in stored if c.value == "40 Nm"][0]
+            new = CX.make(old.subject, old.predicate, "50 Nm",
+                          kind=old.kind)
+            codex.accept(codex.supersede(old.id, new).id)
+            found = CN.contradictions.find(codex.for_sweep(
+                CX.deterministic(Manuscript.load(self.root))))
+            self.assertTrue([c for c in found
+                             if {"40 Nm", "50 Nm"} <= {c.a.value, c.b.value}])
+        finally:
+            codex.close()
+
+    def test_revise_will_not_edit_a_claim_decided_meanwhile(self):
+        project = Project.open(self.root)
+        codex = CX.Codex(project.codex_db)
+        try:
+            claim = codex.add_many(CX.deterministic(
+                Manuscript.load(self.root)))[0]
+            codex.accept(claim.id)
+            with self.assertRaises(ValueError):
+                codex.revise(claim.id, value="99 Nm")
+            self.assertNotEqual(codex.get(claim.id).value, "99 Nm")
+        finally:
+            codex.close()
+
+
+class SharedBetweenThreads(TempProject):
+    """2026-10-28. The host opens the Codex on its GUI thread and uses it
+    from background jobs. With sqlite's default `check_same_thread=True`
+    every one of those jobs raised ProgrammingError — the Continuity sweep
+    failed with its default setting, extraction could never fill the
+    Codex, and the drafting autopilot swallowed the error and drafted with
+    no accepted facts. These tests are the shape of the host's use."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = Project.open(self.root)
+        self.codex = CX.Codex(self.project.codex_db)
+
+    def tearDown(self):
+        self.codex.close()
+        super().tearDown()
+
+    def _in_thread(self, fn):
+        import threading
+        out = {}
+
+        def run():
+            try:
+                out["value"] = fn()
+            except Exception as exc:                 # noqa: BLE001
+                out["error"] = exc
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(30)
+        if "error" in out:
+            raise out["error"]
+        return out.get("value")
+
+    def test_a_worker_thread_can_read_and_write_a_codex_opened_elsewhere(self):
+        doc = Manuscript.load(self.root)
+        added = self._in_thread(
+            lambda: self.codex.add_many(CX.deterministic(doc)))
+        self.assertTrue(added)
+        self.codex.accept(added[0].id)
+        got = self._in_thread(lambda: self.codex.all(state=ACCEPTED))
+        self.assertEqual([c.id for c in got], [added[0].id])
+
+    def test_two_threads_writing_at_once_lose_nothing(self):
+        import threading
+
+        def write(prefix):
+            for i in range(40):
+                self.codex.add(CX.make(f"{prefix}{i}", "colour", "red"))
+        threads = [threading.Thread(target=write, args=(p,))
+                   for p in ("a", "b", "c")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        self.assertEqual(len(self.codex.all()), 120)
+
+
+class DecisionsStick(TempProject):
+    """Re-reading the book must not undo what the author decided."""
+
+    def setUp(self):
+        super().setUp()
+        self.project = Project.open(self.root)
+        self.codex = CX.Codex(self.project.codex_db)
+
+    def tearDown(self):
+        self.codex.close()
+        super().tearDown()
+
+    def test_a_rejected_reading_is_not_proposed_again(self):
+        first = self.codex.add_many(
+            CX.deterministic(Manuscript.load(self.root)))
+        self.codex.reject(first[0].id, "not what this says")
+        again = self.codex.add_many(
+            CX.deterministic(Manuscript.load(self.root)), new_only=True)
+        self.assertEqual(again, [])
+        self.assertEqual(self.codex.get(first[0].id).state, REJECTED)
+
+    def test_a_paragraph_inserted_above_does_not_re_propose_accepted_claims(self):
+        first = self.codex.add_many(
+            CX.deterministic(Manuscript.load(self.root)))
+        for claim in first:
+            self.codex.accept(claim.id)
+        service = self.root / "02-service.md"
+        text = service.read_text(encoding="utf-8")
+        head, body = text.split("\n\n", 1)
+        service.write_text(head + "\n\nA new opening paragraph, with "
+                           "nothing in it to read.\n\n" + body,
+                           encoding="utf-8")
+        again = self.codex.add_many(
+            CX.deterministic(Manuscript.load(self.root)), new_only=True)
+        self.assertEqual(again, [])
+        self.assertEqual(len(self.codex.all()), len(first))
+
+    def test_new_only_counts_what_this_pass_created(self):
+        doc = Manuscript.load(self.root)
+        first = self.codex.add_many(CX.deterministic(doc), new_only=True)
+        second = self.codex.add_many(CX.deterministic(doc), new_only=True)
+        self.assertTrue(first)
+        self.assertEqual(second, [])
+
+
+class TheStateMachineHasNoHoles(TempProject):
+    def setUp(self):
+        super().setUp()
+        self.project = Project.open(self.root)
+        self.codex = CX.Codex(self.project.codex_db)
+
+    def tearDown(self):
+        self.codex.close()
+        super().tearDown()
+
+    def test_superseding_a_claim_that_does_not_exist_raises(self):
+        with self.assertRaises(ValueError):
+            self.codex.supersede(99999, CX.make("sword", "material", "steel"))
+        self.assertEqual(self.codex.all(), [])
+
+    def test_a_rejected_claim_cannot_be_superseded(self):
+        old = self.codex.add(CX.make("sword", "material", "bronze"))
+        self.codex.reject(old.id)
+        with self.assertRaises(ValueError):
+            self.codex.supersede(old.id, CX.make("sword", "material", "steel"))
+        self.assertEqual(self.codex.get(old.id).state, REJECTED)
+
+    def test_correcting_a_superseded_claim_leaves_one_current_value(self):
+        """bronze → steel by supersession; then "bronze was really brass".
+        Brass is the corrected HISTORY, and steel is still the fact."""
+        bronze = self.codex.add(CX.make("sword", "material", "bronze"))
+        self.codex.accept(bronze.id)
+        steel = self.codex.supersede(bronze.id,
+                                     CX.make("sword", "material", "steel"))
+        brass = self.codex.correct(bronze.id,
+                                   CX.make("sword", "material", "brass"))
+        current = [c.value for c in self.codex.all(state=ACCEPTED)]
+        self.assertEqual(current, ["steel"])
+        self.assertEqual(self.codex.get(brass.id).state, SUPERSEDED)
+        self.assertEqual(self.codex.get(brass.id).superseded_by, steel.id)
+        self.assertEqual(self.codex.get(bronze.id).state, REJECTED)
+
+    def test_a_supersession_that_fails_half_way_leaves_nothing_behind(self):
+        old = self.codex.add(CX.make("sword", "material", "bronze"))
+        self.codex.accept(old.id)
+        before = len(self.codex.all())
+        real = self.codex._journal
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("the disk filled up")
+            return real(*args, **kwargs)
+        self.codex._journal = flaky
+        with self.assertRaises(RuntimeError):
+            self.codex.supersede(old.id, CX.make("sword", "material", "steel"))
+        self.codex._journal = real
+        self.assertEqual(len(self.codex.all()), before)
+        self.assertEqual(self.codex.get(old.id).state, ACCEPTED)
 
 
 class TheAuthorsOwnHand(TempProject):

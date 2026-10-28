@@ -150,5 +150,37 @@ class ScalesLinearly(unittest.TestCase):
                         f"linear is 4, the old quadratic was ~16")
 
 
+class PerSectionLoopsBisect(unittest.TestCase):
+    """2026-10-28: `paragraphs()`, `scenes()` and the definitions check
+    walked every block of the FILE once per section — quadratic in one big
+    file, which a .docx always is (3,000 sections: 7.9 s). Structural, per
+    the rule above: each must go through `blocks_in`, the bisect."""
+
+    def test_they_ask_for_the_sections_blocks(self):
+        from writing_workshop import document as D
+        from writing_workshop.craft import technical as TC
+        for module, name in ((D, "paragraphs"), (D, "scenes"),
+                             (TC, "_definitions")):
+            tree = ast.parse(Path(module.__file__).read_text(
+                encoding="utf-8"))
+            body = ast.dump(_function(tree, name))
+            self.assertIn("blocks_in", body, name)
+            self.assertNotIn("attr='blocks'", body, name)
+
+    def test_blocks_in_is_exactly_the_sections_blocks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text(
+                "".join(f"# S{i}\n\nText {i}.\n\n- item {i}\n\n"
+                        for i in range(50)), encoding="utf-8")
+            doc = Manuscript.load(root)
+            src = doc.file("a.md")
+            for sec in doc.sections:
+                slow = [b for b in src.blocks
+                        if sec.body.start <= b.start < sec.body.end]
+                self.assertEqual(doc.blocks_in(sec), slow)
+
+
 if __name__ == "__main__":
     unittest.main()

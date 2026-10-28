@@ -147,6 +147,20 @@ class ProjectRules(TempProject):                      # noqa: F405
         self.assertTrue(report.findings)
         self.assertIn("simply", report.findings[0].title.lower())
 
+    def test_a_headings_rule_points_at_the_heading_text(self):
+        """It pointed three characters early — at `## ` — because the
+        window's text had no marker and its offset did."""
+        (self.root / "extra.md").write_text(
+            "# Extra\n\n## Simply Done\n\nText.\n", encoding="utf-8")
+        doc = Manuscript.load(self.root)
+        rules = R.parse([{"id": "no-simply", "phrase": "simply",
+                          "scope": "headings"}])
+        report = run_craft(doc, TECHNICAL, only=["rules"], rules=rules)
+        hit = next(f for f in report.findings if f.span
+                   and f.span.path == "extra.md")
+        text = (self.root / "extra.md").read_text(encoding="utf-8")
+        self.assertEqual(text[hit.span.start:hit.span.end], "Simply")
+
     def test_a_broken_rule_reports_itself_rather_than_going_quiet(self):
         doc = Manuscript.load(self.root)
         rules = R.parse([{"id": "bad", "pattern": "(unclosed"}])
@@ -191,12 +205,34 @@ class DocumentTypes(TempProject):                     # noqa: F405
         self.assertNotIn("readability", report.ran)
         self.assertIn("terminology", report.ran)
 
+    def test_temperatures_in_different_scales_are_not_compared(self):
+        """Found by the independent check: every temperature unit had
+        factor 1, so °C and °F were "the same unit" and 20 °C against
+        68 °F was a certain contradiction."""
+        from writing_workshop.units import conflict
+        self.assertFalse(conflict("20", "°C", "68", "°F"))
+        self.assertTrue(conflict("20", "°C", "25", "°C"))
+
+    def test_a_count_before_a_quantity_is_not_a_range(self):
+        from writing_workshop.units import quantities
+        for text, number, obj in (("Tighten the 4 bolts to 40 Nm.", "40",
+                                   "bolts"),
+                                  ("Heat 3 cups to 180 °C.", "180", "cups"),
+                                  ("Torque bolts 1 to 6 to 25 Nm.", "25",
+                                   "bolts"),
+                                  ("The torque is 40 Nm to 50 Nm.", "40–50",
+                                   "")):
+            q = quantities(text)[0]
+            self.assertEqual(q.number, number, text)
+            if obj:
+                self.assertEqual(q.subject, obj, text)
+
     def test_a_project_cannot_shadow_a_builtin(self):
         table = DT.parse([{"key": TECHNICAL, "drop": ["units"]}])
         self.assertEqual(table, {})
 
 
-class SettingsCanBeWrittenBack(TempProject):
+class SettingsCanBeWrittenBack(TempProject):            # noqa: F405
     """A settings editor that cannot read its own output eats the author's
     rules the second time they open it. So: round-trips, all three files.
 
@@ -217,7 +253,7 @@ class SettingsCanBeWrittenBack(TempProject):
         self.project.write_rules(first)
         back = Project.open(self.root).project_rules()
         self.assertEqual([r.id for r in back], [r.id for r in first])
-        for a, b in zip(first, back):
+        for a, b in zip(first, back, strict=True):
             for field in ("message", "phrase", "pattern", "severity",
                           "scope", "files", "hint", "ignorecase",
                           "whole_word", "enabled"):
@@ -321,6 +357,17 @@ class SettingsCanBeWrittenBack(TempProject):
                 encoding="utf-8"))
         self.assertEqual(written["doctypes"], [])
 
+    def test_a_type_with_no_base_stays_without_one(self):
+        """`"base": ""` means "only what I add". It came back technical
+        on the next read and ran all twenty checks."""
+        mine = DT.parse([{"key": "release-notes", "base": "",
+                          "add": "echo, terminology"}])["release-notes"]
+        self.assertEqual(mine.base, "")
+        self.assertEqual(mine.add, ("echo", "terminology"))
+        again = DT.parse(DT.to_json([mine])["doctypes"])["release-notes"]
+        self.assertEqual(again.base, "")
+        self.assertEqual(DT.parse([{"key": "x"}])["x"].base, TECHNICAL)
+
     def test_one_spelling_of_each_file_name(self):
         """`state` says nothing else spells a file name; `doctypes` used
         to spell its own, so a rename could half-happen."""
@@ -377,6 +424,48 @@ Till you call my name again
         for name in ("echo", "readability", "passive", "openers"):
             self.assertNotIn(name, report.ran)
 
+    def test_rhyme_is_read_from_the_vowel_group(self):
+        from writing_workshop.craft.lyrics import rhyme_key
+        rhymes = [("day", "way"), ("love", "above"), ("fire", "desire"),
+                  ("queen", "between"), ("again", "rain")]
+        for a, b in rhymes:
+            self.assertEqual(rhyme_key(a), rhyme_key(b), (a, b))
+        self.assertNotEqual(rhyme_key("rain"), rhyme_key("skin"))
+
+    def _refrain(self, song):
+        (self.root / "song.md").write_text(song, encoding="utf-8")
+        return run_craft(Manuscript.load(self.root), LYRICS,
+                         only=["refrain"])
+
+    def test_a_backing_vocal_is_not_a_section_tag(self):
+        song = ("# Song\n\n[Chorus]\nHold the line\n(rise again)\n"
+                "Till the morning comes\n\n[Verse]\nA verse here\n"
+                "Another line\n\n[Chorus]\nHold the line\n"
+                "Till the morning comes\n")
+        report = self._refrain(song)
+        self.assertEqual(report.metrics["refrain_tags"].get("chorus"), 2)
+        self.assertNotIn("rise again", report.metrics["refrain_tags"])
+        self.assertEqual(report.findings, [])
+
+    def test_a_markdown_heading_is_a_tag(self):
+        song = ("# Song\n\n## Chorus\n\nHold the line\nTill the morning "
+                "comes\n\n## Verse\n\nA verse\nhere\n\n## Chorus\n\n"
+                "Hold the rope\nTill the morning comes\n")
+        report = self._refrain(song)
+        self.assertEqual(report.metrics["refrain_tags"].get("chorus"), 2)
+        self.assertTrue(any("line 1" in f.title for f in report.findings))
+
+    def test_the_drifted_chorus_is_the_odd_one_not_the_later_ones(self):
+        right = "And I'll be waiting by the water\nTill you call my name\n"
+        wrong = "And I will wait beside the water\nTill you call my name\n"
+        song = ("# Song\n\n[Chorus]\n" + wrong + "\n[Chorus]\n" + right
+                + "\n[Chorus]\n" + right)
+        report = self._refrain(song)
+        drifted = [f for f in report.findings if f.check == "refrain"]
+        self.assertEqual(len(drifted), 1, [f.title for f in drifted])
+        self.assertEqual(drifted[0].data["occurrence"], 1)
+        self.assertIn("everywhere else", drifted[0].evidence[0])
+
     def test_syllables_per_line_are_measured(self):
         report = run_craft(Manuscript.load(self.root), LYRICS,
                            only=["lyric_lines"])
@@ -404,6 +493,71 @@ def _para(text, style=""):
     return f'<w:p>{props}<w:r><w:t>{text}</w:t></w:r></w:p>'
 
 
+class DocxReadsWhatWordShows(unittest.TestCase):
+    """2026-10-28: each of these was read wrongly, silently."""
+
+    MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+    def _read(self, body, styles=""):
+        import tempfile
+        from writing_workshop import formats as F
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.docx"
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("word/document.xml",
+                            f'<?xml version="1.0"?><w:document xmlns:w="{W}" '
+                            f'xmlns:mc="{self.MC}"><w:body>{body}</w:body>'
+                            f'</w:document>')
+                if styles:
+                    zf.writestr("word/styles.xml",
+                                f'<?xml version="1.0"?><w:styles '
+                                f'xmlns:w="{W}">{styles}</w:styles>')
+            return F.read_docx(path)
+
+    def test_content_controls_are_read(self):
+        out = self._read('<w:sdt><w:sdtContent>' + _para("Inside a control.")
+                         + '</w:sdtContent></w:sdt>')
+        self.assertIn("Inside a control.", out)
+
+    def test_a_localised_heading_style_is_a_heading(self):
+        styles = ('<w:style w:styleId="berschrift1"><w:name '
+                  'w:val="heading 1"/></w:style>')
+        out = self._read(_para("Wartung", "berschrift1")
+                         + _para("Text."), styles)
+        self.assertIn("# Wartung", out)
+
+    def test_a_non_breaking_hyphen_and_a_symbol_survive(self):
+        out = self._read('<w:p><w:r><w:t>Wi</w:t><w:noBreakHyphen/>'
+                         '<w:t>Fi at 10 k</w:t><w:sym w:font="Symbol" '
+                         'w:char="F057"/></w:r></w:p>')
+        self.assertIn("Wi-Fi at 10 kΩ", out)
+
+    def test_a_text_box_is_its_own_paragraph_and_read_once(self):
+        box = ('<w:txbxContent>' + _para("Hot surface") + '</w:txbxContent>')
+        out = self._read(
+            '<w:p><w:r><w:t>See the label.</w:t></w:r><w:r>'
+            f'<mc:AlternateContent><mc:Choice>{box}</mc:Choice>'
+            f'<mc:Fallback>{box}</mc:Fallback></mc:AlternateContent>'
+            '</w:r></w:p>')
+        self.assertEqual(out.count("Hot surface"), 1)
+        self.assertNotIn("label.Hot", out)
+
+    def test_a_tracked_move_is_not_read_twice(self):
+        out = self._read('<w:p><w:moveFrom><w:r><w:t>Moved.</w:t></w:r>'
+                         '</w:moveFrom><w:r><w:t>Stays.</w:t></w:r></w:p>'
+                         + '<w:p><w:moveTo><w:r><w:t>Moved.</w:t></w:r>'
+                         '</w:moveTo></w:p>')
+        self.assertEqual(out.count("Moved."), 1)
+
+    def test_a_paragraph_that_starts_like_markdown_stays_a_paragraph(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            _docx(Path(tmp) / "m.docx", _para("Servicing", "Heading1")
+                  + _para("# of retries is three."))
+            doc = Manuscript.load(tmp)
+        self.assertEqual([s.title for s in doc.sections], ["Servicing"])
+
+
 class Docx(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -413,7 +567,7 @@ class Docx(unittest.TestCase):
               _para("Servicing", "Heading1")
               + _para("The torque of 40 Nm applies to the housing.")
               + _para("4.2 Torque", "Heading2")
-              + _para("Use a torque of 45 Nm on the cover.")
+              + _para("Use a torque of 45 Nm on the housing.")
               + _para("Remove the cover.", "ListParagraph"))
 
     def tearDown(self):

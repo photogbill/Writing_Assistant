@@ -26,7 +26,7 @@ import re
 
 from .. import textio as T
 from ..types import ATTRIBUTE, NUMERIC, RELATIONSHIP, TEMPORAL, Claim, Span
-from ..units import UNITS, split_value, to_base
+from ..units import dimension as _dimension, split_value, to_base
 
 _NUM = re.compile(r"(?<![\w.])(-?\d[\d,]*(?:\.\d+)?)\s*([A-Za-z°·µ/%]{1,12})?")
 
@@ -37,7 +37,8 @@ _MONTHS = ("january", "february", "march", "april", "may", "june", "july",
 
 _IS = re.compile(
     r"\b(?P<subj>[A-Z][\w' -]{1,40}?)\s+(?:is|was|are|were)\s+"
-    r"(?:the\s+|a\s+|an\s+)?(?P<val>[a-z][\w -]{1,40}?)\b(?=[.,;:]|\s+(?:and|but|which|who|when)\b|$)")
+    r"(?P<art>the\s+|a\s+|an\s+)?(?P<val>[a-z][\w -]{1,40}?)\b"
+    r"(?=[.,;:]|\s+(?:and|but|which|who|when)\b|$)")
 _REL = re.compile(
     r"\b(?P<a>[A-Z][\w'-]{1,25})(?:'s|’s)\s+(?P<rel>brother|sister|"
     r"mother|father|son|daughter|wife|husband|cousin|uncle|aunt|partner|"
@@ -113,7 +114,7 @@ def base_value(number: float | None, unit: str) -> float | None:
 
 
 def dimension(unit: str) -> str:
-    return UNITS[unit][0] if unit in UNITS else ""
+    return _dimension(unit)
 
 
 def make(subject: str, predicate: str, value: str, *, kind: str = ATTRIBUTE,
@@ -143,42 +144,33 @@ def make(subject: str, predicate: str, value: str, *, kind: str = ATTRIBUTE,
 
 
 def numeric_claims(doc, terms: list[str] | None = None) -> list[Claim]:
-    """Every "<named quantity> is <number> <unit>" in the document.
+    """Every stated quantity in the document, named by what it is OF.
 
-    No model, and no guessing: a number with no quantity word near it is
-    skipped rather than attached to whatever noun was closest. Inventing
-    the subject is how a continuity report fills with conflicts that are
-    really parser noise, and one of those costs more trust than ten real
-    findings buy.
+    No model, and no guessing: a number with no quantity word near it (and
+    no imperative naming what it is set on) is skipped rather than attached
+    to whatever noun was closest.
+
+    THE SUBJECT IS THE OBJECT, THE PREDICATE THE QUANTITY (2026-10-28):
+    "The torque for the lid bolts is 40 Nm" is `lid bolts: torque = 40 Nm`,
+    and "Tighten the wheel nuts to 110 Nm" is `wheel nuts: torque = 110 Nm`.
+    It used to be `torque: value = …` for both, so every torque in a manual
+    shared one key and N different specs made N(N−1)/2 "certain"
+    contradictions. A quantity nothing names stays `torque: value = …` and
+    is compared only within its own section — see `contradictions`.
     """
-    from ..units import NUM_UNIT, QUANTITY_WORDS
+    from ..units import quantities
     extra = {T.normalise(t) for t in (terms or [])}
     out: list[Claim] = []
     for src in doc.files:
         prose = doc.prose_of_file(src.rel)
-        for m in NUM_UNIT.finditer(prose):
-            subject = _quantity_near(prose, m.start(), QUANTITY_WORDS, extra)
-            if not subject:
-                continue
-            span = Span(src.rel, m.start(), m.end())
+        for q in quantities(prose, extra):
+            span = Span(src.rel, q.start, q.end)
             sec = doc.section_at(span)
             out.append(make(
-                subject, "value", m.group(0), kind=NUMERIC, span=span,
+                q.subject, q.predicate, q.text, kind=NUMERIC, span=span,
                 source_ref=_ref(doc, span), quote=doc.quote(span),
                 section_id=sec.id if sec else "", origin="measured"))
     return out
-
-
-def _quantity_near(prose: str, at: int, quantity_words, extra) -> str:
-    before = [T.normalise(w) for w in T.word_list(prose[max(0, at - 60):at])]
-    for word in reversed(before[-6:]):
-        if word in quantity_words or word in extra:
-            return word
-    after = [T.normalise(w) for w in T.word_list(prose[at:at + 60])][:5]
-    for word in after:
-        if word in quantity_words or word in extra:
-            return word
-    return ""
 
 
 def temporal_claims(doc) -> list[Claim]:
@@ -238,20 +230,44 @@ def attribute_claims(doc, subjects: list[str]) -> list[Claim]:
                                 section_id=sec.id if sec else "",
                                 origin="measured"))
         for m in _IS.finditer(prose):
-            subj = T.normalise(m.group("subj"))
-            if subj not in wanted:
+            subj = _wanted_at_end(T.normalise(m.group("subj")), wanted)
+            if subj is None:
                 continue
             value = m.group("val").strip()
-            if T.is_common(value) and len(value) < 5:
-                continue
+            #: FILED UNDER THE SAME PREDICATE AS THE ADJECTIVE FORM
+            #: (2026-10-28). "Excalibur was bronze" used to be predicate
+            #: "is" while "the steel Excalibur" was "material", so the
+            #: headline case of this whole package never met itself. And
+            #: ANY lowercase phrase counted: "Mira was tired", "happy", "in
+            #: the kitchen" made six candidate conflicts about one woman's
+            #: afternoon. A value is kept when it is a known attribute word
+            #: (material, colour, size, age) or an identity introduced by
+            #: an article ("Mira is a soldier"); states are not facts.
+            predicate = _ADJ_PREDICATE.get(T.normalise(value))
+            if predicate is None:
+                if not m.group("art") or (T.is_common(value)
+                                          and len(value) < 5):
+                    continue
+                predicate = "is"
             span = Span(src.rel, m.start(), m.end())
             sec = doc.section_at(span)
-            out.append(make(wanted[subj], "is", value, kind=ATTRIBUTE,
+            out.append(make(wanted[subj], predicate, value, kind=ATTRIBUTE,
                             span=span, source_ref=_ref(doc, span),
                             quote=doc.quote(span),
                             section_id=sec.id if sec else "",
                             origin="measured"))
     return out
+
+
+def _wanted_at_end(subject: str, wanted: dict) -> str | None:
+    """The known subject a captured phrase ENDS with: "Yesterday Mira" is
+    Mira, "The sword" is the sword. Whole words only."""
+    if subject in wanted:
+        return subject
+    for key in wanted:
+        if subject.endswith(" " + key):
+            return key
+    return None
 
 
 def relationship_claims(doc) -> list[Claim]:

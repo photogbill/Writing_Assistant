@@ -177,8 +177,23 @@ def _numeric(a: Claim, b: Claim) -> Conflict | None:
         return None
     if not _values_conflict(a_raw, a_unit, b_raw, b_unit):
         return None
+    name = (a.subject if a.predicate.lower() in ("value", "is", "")
+            else f"{a.subject} {a.predicate}")
+    if a.predicate.lower() == "value" and a.section_id != b.section_id:
+        #: A BARE quantity — "the torque is 40 Nm", with nothing saying
+        #: what it is the torque OF — in two different sections may be two
+        #: different parts. Certain within a section; across sections a
+        #: candidate, said as one. Reporting it as a defect is what made a
+        #: service manual's torque table read as twenty contradictions.
+        return Conflict(a, b, NUMERIC, False,
+                        f"{name} is {a.value} in {a.source_ref} and "
+                        f"{b.value} in {b.source_ref}. Neither passage says "
+                        f"what it is the {a.subject} OF, so these may be two "
+                        f"different parts — name each one (\u201cthe "
+                        f"{a.subject} for the lid bolts\u201d) and this "
+                        f"check can tell.")
     return Conflict(a, b, NUMERIC, True,
-                    f"{a.subject} is {a.value} in {a.source_ref} and "
+                    f"{name} is {a.value} in {a.source_ref} and "
                     f"{b.value} in {b.source_ref}. Compared at the "
                     f"precision each was written to, so this is neither a "
                     f"units mismatch nor rounding — the numbers differ.")

@@ -65,7 +65,8 @@ _CONTINUITY = Persona(
     "List anything in the passage that disagrees with the established "
     "facts. For each, quote the exact phrase and name the fact it "
     "contradicts. If nothing disagrees, answer exactly: NOTHING.",
-    returns_text=False, temperature=0.0, wants_claims=True)
+    returns_text=False, temperature=0.0, wants_claims=True,
+    doc_types=("technical", "fiction", "lyrics"))
 
 _EXPANDER = Persona(
     EXPANDER, "The Expander",
@@ -101,8 +102,40 @@ _ADVERSARY_FIC = Persona(
     "there is nowhere, answer exactly: NOTHING.",
     returns_text=False, temperature=0.2, doc_types=("fiction",))
 
+#: LYRICS GOT NO READERS AT ALL until 2026-10-28 — `for_document("lyrics")`
+#: returned an empty list and The Room showed an empty picker with no word
+#: of why. A lyric has its own two: an editor who keeps the tune, and the
+#: singer, who is to a lyric what the 3am technician is to a procedure.
+_LINE_LYRIC = Persona(
+    LINE_EDITOR, "The Line Editor",
+    "Tightens a lyric without breaking the tune: syllables, stresses and "
+    "rhymes kept.",
+    "You are a lyric editor. You return the revised lyric and never "
+    "commentary. You keep every section tag exactly as written, keep each "
+    "line within one syllable of the original, keep the stressed syllables "
+    "where the singer lands on them, and keep the rhyme sound at the end of "
+    "every line that rhymes. You never add a line, never remove one, and "
+    "never change a name.",
+    "Revise the lyric below. Return ONLY the revised lyric, with its "
+    "section tags, no preamble and no markdown fence.",
+    returns_text=True, temperature=0.3, doc_types=("lyrics",))
+
+_ADVERSARY_LYRIC = Persona(
+    ADVERSARY, "The Singer",
+    "The vocalist who has to sing this live, once, over a band.",
+    "You are the singer who has to perform this lyric live, once, over a "
+    "loud band, to a room hearing it for the first time. You report every "
+    "line you could not sing in one breath, every word that lands on the "
+    "wrong stress, every pair of lines that does not rhyme when the form "
+    "says it should, and every line whose meaning a listener would lose on "
+    "one hearing — not every line that could be prettier.",
+    "Read the lyric as that singer. List each problem, quoting the exact "
+    "line and saying what goes wrong when you sing it. If there is "
+    "nothing, answer exactly: NOTHING.",
+    returns_text=False, temperature=0.2, doc_types=("lyrics",))
+
 ALL: tuple[Persona, ...] = (_LINE, _CONTINUITY, _EXPANDER, _ADVERSARY_TECH,
-                            _ADVERSARY_FIC)
+                            _ADVERSARY_FIC, _LINE_LYRIC, _ADVERSARY_LYRIC)
 
 
 def for_document(document_type: str) -> list[Persona]:

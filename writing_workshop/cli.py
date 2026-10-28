@@ -112,7 +112,8 @@ def cmd_craft(args) -> int:
     if args.json:
         print(json.dumps({
             "metrics": report.metrics, "timing": report.timing,
-            "skipped": report.skipped, "counts": sorted_out.counts,
+            "skipped": report.skipped, "quiet": report.quiet,
+            "counts": sorted_out.counts,
             "findings": [{**f.__dict__} for f in shown]},
             default=str, indent=2))
     else:
@@ -122,6 +123,8 @@ def cmd_craft(args) -> int:
         print(sorted_out.summary())
         for name, why in report.skipped.items():
             print(f"   not run — {name}: {why}")
+        for name, why in report.quiet.items():
+            print(f"   nothing to say — {name}: {why}")
         if args.timing:
             for name, secs in sorted(report.timing.items(),
                                      key=lambda kv: -kv[1]):
@@ -216,6 +219,14 @@ def cmd_continuity(args) -> int:
     project, doc = _load(args.path)
     claims = CX.deterministic(doc, terms=project.effective_terms(),
                               subjects=project.cast or None)
+    if Path(project.codex_db).exists():
+        # What the author decided stands: a rejected reading is not
+        # re-reported, and accepted claims are compared too.
+        store = CX.Codex(project.codex_db)
+        try:
+            claims = store.for_sweep(claims)
+        finally:
+            store.close()
     sweep = CN.sweep(doc, claims, cast=project.cast,
                      terms=project.effective_terms(),
                      events=_Progress(args.progress))
@@ -247,8 +258,8 @@ def cmd_codex(args) -> int:
                   + ("…" if len(who) > 12 else ""))
         added = store.add_many(
             CX.deterministic(doc, terms=project.effective_terms(),
-                             subjects=project.cast or None))
-        print(f"{len(added)} claims proposed.")
+                             subjects=project.cast or None), new_only=True)
+        print(f"{len(added)} new claims proposed.")
     for claim in store.all(state=args.state or None):
         print(f"#{claim.id:<4} [{claim.state:10}] {claim.kind:12} "
               f"{claim.subject} · {claim.predicate} = {claim.value}  "

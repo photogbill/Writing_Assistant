@@ -18,6 +18,17 @@ Numbers in titles are normalised to `#` for the same reason: three
 sentences opening with "The" and four sentences opening with "The" are one
 decision, not two.
 
+**But a number that names the thing is not a count.** Key version 1
+blanked every digit everywhere, so "Flat rhythm in Chapter 3" and "Flat
+rhythm in Chapter 9" were one key — one dismissal hid every chapter's,
+including chapters not written yet — and a dismissed "torque: 40 vs 45 Nm"
+also hid "40 vs 400". Version 2 keeps digits in the SUBJECT (a term, a
+figure id, a step), in the section a finding names, and in the values a
+contradiction is between, and blanks them only in the prose of the title
+and the evidence, which is where the counts live. Dismissals made under
+version 1 still hold, but only for a finding whose title is exactly the
+one the author dismissed.
+
 **Nothing here dismisses anything by itself.** There is no confidence
 threshold, no auto-hide and no "clear all" — a dismissal is an act by the
 author, recorded with a date and, if they gave one, a reason. That is the
@@ -40,7 +51,16 @@ from .types import Finding
 #: — `"echo" × 40 words apart` and `"echo" × 60 words apart` are one
 #: finding the author has already read.
 SUBJECT_FIELDS = ("word", "phrase", "name", "term", "acronym", "subject",
-                  "forms", "kind", "id", "step", "dimension")
+                  "forms", "kind", "id", "step", "dimension", "rule")
+
+#: Fields that are part of the identity AS WELL AS the subject, digits and
+#: all: the section a finding is about (`craft.run` records it whenever
+#: the title names one) and the values a contradiction is between.
+IDENTITY_FIELDS = ("section", "values", "id")
+
+#: Bumped when `key` changes. `last-run.json` from another version is not
+#: compared against — every finding would otherwise be "new" at once.
+KEY_VERSION = 2
 
 _NUM = re.compile(r"\d[\d,.:]*")
 _WS = re.compile(r"\s+")
@@ -54,6 +74,18 @@ def _flat(value) -> str:
     return str(value)
 
 
+def _name(value) -> str:
+    """A subject, normalised but with its digits: `Figure 3` is not
+    `Figure 9`. A dict contributes its KEYS only — `forms` maps each
+    spelling to a count, and the count is exactly what must not matter —
+    and a list is sorted, so its order is not part of the identity."""
+    if isinstance(value, dict):
+        value = list(value)
+    if isinstance(value, (list, tuple, set)):
+        return ",".join(sorted(_name(v) for v in value))
+    return _WS.sub(" ", str(value).lower()).strip()[:300]
+
+
 def _norm(text: str) -> str:
     """Lowercase, digits blanked, whitespace collapsed, bounded."""
     return _WS.sub(" ", _NUM.sub("#", (text or "").lower())).strip()[:300]
@@ -63,10 +95,15 @@ def subject_of(finding: Finding) -> str:
     """What this finding is ABOUT, from the check's own data."""
     for name in SUBJECT_FIELDS:
         if name in finding.data:
-            value = _flat(finding.data[name])
+            value = _name(finding.data[name])
             if value:
-                return _norm(value)
+                return value
     return ""
+
+
+def _identity(finding: Finding) -> str:
+    return ";".join(f"{name}={_name(finding.data[name])}"
+                    for name in IDENTITY_FIELDS if finding.data.get(name))
 
 
 def key(finding: Finding) -> str:
@@ -77,10 +114,30 @@ def key(finding: Finding) -> str:
     findings colliding costs one dismissal that covers both; a key nobody
     can scan costs a feature nobody uses.
     """
-    parts = [finding.check, subject_of(finding), _norm(finding.title),
+    parts = [finding.check, subject_of(finding), _identity(finding),
+             _norm(finding.title),
              _norm(finding.evidence[0] if finding.evidence else "")]
     digest = hashlib.sha1("|".join(parts).encode("utf-8"))
     return digest.hexdigest()[:12]
+
+
+def key_v1(finding: Finding) -> str:
+    """The version-1 key, kept ONLY to honour dismissals made with it.
+
+    Never used to hide a finding on its own: v1 keys collide (see the
+    module docstring), so a v1 dismissal holds a finding only when the
+    title it recorded is this finding's title, character for character.
+    """
+    subject = ""
+    for name in SUBJECT_FIELDS[:-1]:
+        if name in finding.data:
+            value = _flat(finding.data[name])
+            if value:
+                subject = _norm(value)
+                break
+    parts = [finding.check, subject, _norm(finding.title),
+             _norm(finding.evidence[0] if finding.evidence else "")]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 def stamp(findings: list[Finding]) -> list[Finding]:
@@ -105,9 +162,23 @@ class Dismissals:
 
     def __init__(self, store: Store) -> None:
         self.store = store
-        data = store.read(DISMISSED, {})
+        self.entries: dict[str, dict] = self._load()
+        #: What THIS object changed since it was read. `save` re-reads the
+        #: file and applies only these, so an entry another window removed
+        #: is not re-asserted from our stale copy of it.
+        self._added: dict[str, dict] = {}
+        self._removed: set[str] = set()
+
+    def _load(self) -> dict[str, dict]:
+        data = self.store.read(DISMISSED, {})
         entries = data.get("entries") if isinstance(data, dict) else None
-        self.entries: dict[str, dict] = dict(entries or {})
+        return {k: v for k, v in (entries or {}).items()
+                if isinstance(v, dict)} if isinstance(entries, dict) else {}
+
+    @property
+    def problem(self) -> str:
+        """Why the file could not be read as it is, or ""."""
+        return self.store.problems.get(DISMISSED, "")
 
     # -- reading ----------------------------------------------------------
 
@@ -117,12 +188,26 @@ class Dismissals:
     def __contains__(self, item) -> bool:
         return self.holds(item)
 
+    def _key_of(self, item) -> str | None:
+        """The entry that holds `item` — a key, or a finding — or None."""
+        if isinstance(item, str):
+            return item if item in self.entries else None
+        k = item.key or key(item)
+        if k in self.entries:
+            return k
+        old = key_v1(item)
+        row = self.entries.get(old)
+        if row is not None and not row.get("v") and \
+                row.get("title") == item.title:
+            return old
+        return None
+
     def holds(self, item) -> bool:
-        return (item if isinstance(item, str) else key(item)) in self.entries
+        return self._key_of(item) is not None
 
     def reason(self, item) -> str:
-        row = self.entries.get(item if isinstance(item, str) else key(item))
-        return (row or {}).get("reason", "")
+        k = self._key_of(item)
+        return (self.entries.get(k) or {}).get("reason", "") if k else ""
 
     def all(self) -> list[dict]:
         rows = []
@@ -138,22 +223,45 @@ class Dismissals:
         k = key(finding)
         self.entries[k] = {"check": finding.check, "title": finding.title,
                            "reason": reason.strip(), "at": at,
-                           "severity": finding.severity}
+                           "severity": finding.severity, "v": KEY_VERSION}
+        self._added[k] = self.entries[k]
+        self._removed.discard(k)
         if save:
             self.save()
         return k
 
     def remove(self, item, *, save: bool = True) -> bool:
-        k = item if isinstance(item, str) else key(item)
-        if k not in self.entries:
+        k = self._key_of(item)
+        if k is None:
             return False
         del self.entries[k]
+        self._added.pop(k, None)
+        self._removed.add(k)
         if save:
             self.save()
         return True
 
     def save(self) -> None:
-        self.store.write(DISMISSED, {"version": 1, "entries": self.entries})
+        """Re-read, merge, write.
+
+        Two windows on one project -- the ATK page and the CLI, or two
+        pages -- each hold their own copy. Writing ours over the file
+        would drop whatever the other one recorded since we read it, and
+        a dismissal that silently un-happens is the one failure this
+        module cannot have.
+        """
+        merged = self._load()
+        for k in self._removed:
+            merged.pop(k, None)
+        merged.update(self._added)
+        self.store.write(DISMISSED, {"version": KEY_VERSION,
+                                     "entries": merged})
+        self.entries = merged
+        # Applied, so no longer pending. Kept, every later save re-applied
+        # them over the re-read file: a dismissal another window removed
+        # came back, and one it added was deleted again.
+        self._added.clear()
+        self._removed.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +316,7 @@ def triage(findings: list[Finding], *, dismissals: Dismissals | None = None,
     live: set[str] = set()
     for finding in findings:
         live.add(finding.key)
-        if dismissals is not None and dismissals.holds(finding.key):
+        if dismissals is not None and dismissals.holds(finding):
             result.hidden.append(finding)
             continue
         result.shown.append(finding)
@@ -229,10 +337,18 @@ def remember(store: Store, findings: list[Finding], *, at: str = "") -> None:
     """
     stamp(findings)
     store.write(LAST_RUN, {
-        "version": 1, "at": at,
+        "version": KEY_VERSION, "at": at,
         "keys": {f.key: f.title for f in findings}})
 
 
 def previous(store: Store) -> dict:
+    """The last run's keys, or {} when there is none to compare against.
+
+    A run recorded under another key version counts as none: its keys
+    cannot match, so comparing would call every finding "new" and every
+    old one "gone" — a delta that is all noise, once, and teaches the
+    author to ignore it."""
     data = store.read(LAST_RUN, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict) or data.get("version") != KEY_VERSION:
+        return {}
+    return data

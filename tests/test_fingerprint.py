@@ -113,5 +113,38 @@ class PerProject(unittest.TestCase):
                             novel.metrics.get("dialogue"))
 
 
+class TheAuthorIsNotAStranger(unittest.TestCase):
+    """2026-10-28: fitted on the project's own build plan and scored on
+    its OWN windows, 64% of them read as "not you" (drift ≥ 1.5), and
+    every one-sentence suggestion did. The score was the RMS of only the
+    notable z-scores, so one metric of twelve past 1.5 was enough."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        from writing_workshop import textio as T
+        root = Path(__file__).resolve().parents[1]
+        source = root / "Writing Workshop - build plan.md"
+        if not source.exists():
+            raise unittest.SkipTest("the build plan is the corpus here")
+        text = source.read_text(encoding="utf-8")
+        cls.prose = T.prose_of(text)
+        cls.windows = FP.windows(cls.prose)
+        cls.fp = FP.fit(cls.windows)
+
+    def test_most_of_your_own_windows_sound_like_you(self):
+        scores = [FP.drift_score(FP.score(self.fp, w)) for w in self.windows]
+        flagged = sum(score >= 1.5 for score in scores) / len(scores)
+        self.assertLess(flagged, 0.10, flagged)
+
+    def test_one_sentence_is_not_scored_on_its_spread(self):
+        drifts = FP.score(self.fp, "The workshop measures before it "
+                                   "generates, and it says so plainly.")
+        metrics = {d.metric for d in drifts}
+        self.assertNotIn("sentence_spread", metrics)
+        self.assertNotIn("article_openings", metrics)
+        self.assertNotIn("ttr", metrics)
+
+
 if __name__ == "__main__":
     unittest.main()

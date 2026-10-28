@@ -38,12 +38,24 @@ class ShunnSpec:
 
     @property
     def rounded_words(self) -> int:
-        """Shunn rounds: 'about 74,000 words', never 73,842."""
-        if self.word_count < 1500:
-            return round(self.word_count, -2)
-        if self.word_count < 10000:
-            return round(self.word_count, -3) or 1000
-        return round(self.word_count, -3)
+        """Shunn rounds: 'about 1,500 words', never 1,486.
+
+        FIXED 2026-10-28. This rounded to the nearest THOUSAND from 1,500
+        words up, so 1,507 words was "about 2,000" — where Shunn's own page
+        rounds its 1,486-word example to 1,500. His rule: the nearest
+        hundred, and the nearest 500 "if you're edging into novella
+        territory" (taken here as 17,500 words, the SFWA novelette ceiling).
+        He gives no novel rule; the nearest thousand from 40,000 is the
+        common practice and is labelled as that. Half rounds UP — Python's
+        `round` rounds half to even, which made 1,250 "about 1,200". Under
+        a hundred words the exact count is given: "about 0 words" is not a
+        word count.
+        """
+        n = int(self.word_count)
+        if n < 100:
+            return n
+        step = 100 if n < 17500 else 500 if n < 40000 else 1000
+        return (n + step // 2) // step * step
 
 
 def _short_title(title: str, limit: int = 3) -> str:
@@ -52,29 +64,78 @@ def _short_title(title: str, limit: int = 3) -> str:
     return " ".join(words[:limit]) or title
 
 
-def shunn_spec(doc, *, title: str = "", author: str = "",
-               legal_name: str = "", address: list[str] | None = None,
-               email: str = "", phone: str = "") -> ShunnSpec:
-    chapters: list[tuple[str, list[str]]] = []
-    for sec in doc.chapters():
-        paragraphs: list[str] = []
-        prose = doc.prose_of_file(sec.path)
-        for scene_no, scene in enumerate(doc.scenes(sec)):
-            if scene_no:
+def _descendants(doc, sec) -> list:
+    """Every section under `sec`, in reading order."""
+    out, parents = [], {sec.id}
+    for other in doc.sections:
+        if other.parent_id in parents:
+            out.append(other)
+            parents.add(other.id)
+    return out
+
+
+def _chapter_level(doc) -> tuple[list, str]:
+    """The sections that are the CHAPTERS, and a book title if one heads
+    them.
+
+    FIXED 2026-10-28. A novel written as `# The Long Road` with `## Chapter
+    One`, `## Chapter Two` beneath it exported as the title, then THE END,
+    with no prose at all: the export walked the top-level sections, and a
+    section's body stops at the next heading of ANY level, so every
+    chapter's prose belonged to a child the export never visited. One top
+    heading over several children is a title over chapters; and prose under
+    a chapter's own sub-headings is gathered into the chapter.
+    """
+    tops = doc.chapters()
+    if len(tops) == 1:
+        children = [s for s in doc.sections if s.parent_id == tops[0].id]
+        if len(children) > 1:
+            return children, tops[0].title
+    return tops, ""
+
+
+def _paragraphs_of(doc, parts) -> list[str]:
+    paragraphs: list[str] = []
+    for part_no, part in enumerate(parts):
+        if part_no and paragraphs and paragraphs[-1] != "#":
+            paragraphs.append("#")
+        for scene_no, scene in enumerate(doc.scenes(part)):
+            if scene_no and paragraphs and paragraphs[-1] != "#":
                 paragraphs.append("#")
-            for para in doc.paragraphs(sec):
+            for para in doc.paragraphs(part):
                 if not (scene.start <= para.span.start < scene.end):
                     continue
                 text = " ".join(para.text.split())
                 if text and text != "#":
                     paragraphs.append(text)
-        chapters.append((sec.title, paragraphs))
-        del prose
+    while paragraphs and paragraphs[-1] == "#":
+        paragraphs.pop()
+    return paragraphs
+
+
+def shunn_spec(doc, *, title: str = "", author: str = "",
+               legal_name: str = "", address: list[str] | None = None,
+               email: str = "", phone: str = "") -> ShunnSpec:
+    chapters: list[tuple[str, list[str]]] = []
+    tops, book_title = _chapter_level(doc)
+    if book_title:
+        # Prose under the TITLE heading itself — an untitled opening, an
+        # epigraph — before the first chapter. Only the children were
+        # exported, so it vanished without a word (found by the
+        # independent check). It goes first, as a section with no heading.
+        head = doc.chapters()[0]
+        opening = _paragraphs_of(doc, [head])
+        if opening:
+            chapters.append(("", opening))
+    for sec in tops:
+        chapters.append((sec.title,
+                         _paragraphs_of(doc, [sec, *_descendants(doc, sec)])))
     words = doc.words
     name = author or legal_name
     surname = name.split()[-1] if name else ""
     spec = ShunnSpec(
-        title=title or (doc.chapters()[0].title if doc.chapters() else ""),
+        title=title or book_title
+        or (doc.chapters()[0].title if doc.chapters() else ""),
         author=author, legal_name=legal_name or author,
         address=list(address or []), email=email, phone=phone,
         word_count=words, chapters=chapters)
@@ -106,8 +167,9 @@ def shunn_markdown(spec: ShunnSpec) -> str:
         lines.append(f"by {spec.author}")
     for title, paragraphs in spec.chapters:
         lines.append("")
-        lines.append(f"## {title}")
-        lines.append("")
+        if title:
+            lines.append(f"## {title}")
+            lines.append("")
         for para in paragraphs:
             lines.append(para)
             lines.append("")

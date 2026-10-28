@@ -16,7 +16,7 @@ import re
 
 from .. import textio as T
 from ..types import DEFECT, NOTE, TECHNICAL, WARN, CraftReport, Finding, Span
-from ..units import NUM_UNIT, QUANTITY_WORDS, conflict, dimension
+from ..units import NUM_UNIT, conflict, quantities, unit_key
 from . import ANY_LANGUAGE, Ctx, check
 
 # ---------------------------------------------------------------------------
@@ -85,8 +85,12 @@ def terminology(ctx: Ctx) -> CraftReport:
                                 for f in counter}) == 1
         if total < 3 and not punctuation_only and key not in seeded:
             continue
-        variants = ", ".join(f"“{name}” ×{n}"
-                             for name, n in counter.most_common())
+        # Alphabetical, not by count: the title is part of the finding's
+        # key, and an order that flips when one more use is typed would
+        # make a dismissed finding come back as new.
+        variants = ", ".join(f"“{name}” ×{n}" for name, n in
+                             sorted(counter.items(),
+                                    key=lambda kv: (kv[0].lower(), kv[0])))
         winner = counter.most_common(1)[0][0]
         rep.findings.append(Finding(
             "terminology", WARN,
@@ -169,10 +173,8 @@ def _definitions(ctx: Ctx) -> list[Definition]:
         if not src:
             continue
         prose = ctx.doc.prose_of_file(sec.path)
-        for block in src.blocks:
+        for block in ctx.doc.blocks_in(sec):
             if not block.is_prose:
-                continue
-            if not (sec.body.start <= block.start < sec.body.end):
                 continue
             text = prose[block.start:block.end]
             for line_off, line in _lines(text):
@@ -387,10 +389,18 @@ def _initials_match(text: str, letters: list[str]) -> bool:
 # cross-references
 # ---------------------------------------------------------------------------
 
+#: A reference is a kind word, then a separator, then an id. FIXED
+#: 2026-10-28: with nothing ending the kind word and `[A-Z]` matching lower
+#: case under re.I, "The following sections describe…" read as a reference
+#: to Section S, and so did "all figures", "the tables", "two parts" and
+#: "the section a reader needs" — fifteen DEFECTs on the project's own
+#: build plan. The kind is a whole word now, the separator is required, and
+#: a letter id is a capital.
 _XREF = re.compile(
     r"\b(?:(?P<kind>section|clause|chapter|part|appendix|annex|figure|fig"
-    r"|table|step|item|equation|eq)\.?\s*(?P<id>[A-Z]?\d+(?:\.\d+)*|[A-Z])"
-    r"|§\s*(?P<sid>\d+(?:\.\d+)*))\b", re.I)
+    r"|table|step|item|equation|eq)\b(?:\.\s*|\s+)"
+    r"(?P<id>(?-i:[A-Z])?\d+(?:\.\d+)*\b|(?-i:[A-Z])\b)"
+    r"|§\s*(?P<sid>\d+(?:\.\d+)*)\b)", re.I)
 _CAPTION = re.compile(
     r"^\s*\**(?P<kind>figure|fig|table)\.?\s*(?P<id>[A-Z]?\d+(?:\.\d+)*)"
     r"\**\s*[-—–:.]", re.I)
@@ -408,7 +418,12 @@ def xrefs(ctx: Ctx) -> CraftReport:
     """
     rep = CraftReport()
     numbers = {s.number for s in ctx.doc.sections if s.number}
-    numbers |= {s.derived_number for s in ctx.doc.sections}
+    #: Derived numbers ONLY when the author numbered nothing. With an
+    #: unnumbered Preface and Safety chapter in front, the parser's "5" is
+    #: the author's §3 — so "See Section 5" quietly resolved to the wrong
+    #: section and a dead reference was hidden.
+    if not numbers:
+        numbers = {s.derived_number for s in ctx.doc.sections}
     titles = {s.title.strip().lower() for s in ctx.doc.sections}
     appendices = {s.title.split()[-1].strip(":.").upper()
                   for s in ctx.doc.sections
@@ -441,6 +456,10 @@ def xrefs(ctx: Ctx) -> CraftReport:
             ident = (m.group("id") or m.group("sid") or "").upper()
             if not ident:
                 continue
+            if (len(ident) == 1 and ident.isalpha()
+                    and m.group("kind")[:1].islower()
+                    and kind not in ("appendix", "annex")):
+                continue      # "the part I liked" is a pronoun, not Part I
             if kind in ("step", "item"):
                 continue                      # handled by step_numbering
             checked += 1
@@ -673,22 +692,30 @@ def register(ctx: Ctx) -> CraftReport:
 
 @check("units", "Unit and number consistency", TECHNICAL)
 def units(ctx: Ctx) -> CraftReport:
-    """The same quantity given two values anywhere in the document.
+    """The same quantity of the same THING given two values.
 
     This catches the torque-spec class of defect before any model is
     involved, and it is deterministic. Two quantities disagree when their
-    STATED-PRECISION intervals do not overlap — so `40 Nm` in §4.2 and
-    `29.5 lb-ft` in the appendix are recognised as the author's own correct
-    conversion rather than reported as a contradiction, while `40 Nm` and
-    `45 Nm` are a defect. See `writing_workshop.units` for why that is a
-    precision question and not a tolerance anybody has to justify.
+    stated values disagree — at the precision each was written to across a
+    conversion (`40 Nm` against `29.5 lb-ft` is the author's own correct
+    conversion), and as written within one unit (`3 V` is not `3.3 V`).
+
+    WHAT IS COMPARED WITH WHAT (2026-10-28). Quantities used to be grouped
+    by the bare quantity word across the whole book, so wheel nuts at
+    110 Nm against spark plugs at 25 Nm was a defect, and so was a 3.3 V
+    logic supply against a 12 V main one. They are grouped now by what
+    they are OF — `units.quantities` reads "the torque for the wheel nuts"
+    and "tighten the wheel nuts to" alike. A quantity nothing names is
+    compared within its own section as a defect, and across sections only
+    as a warning that says why it cannot tell.
     """
     rep = CraftReport()
-    seen: defaultdict[str, list[tuple[str, str, str, Span]]] = defaultdict(
-        list)
-    styles: defaultdict[str, Counter] = defaultdict(Counter)
+    seen: defaultdict[str, list[tuple[str, str, str, Span, str]]] = \
+        defaultdict(list)
+    styles: defaultdict[tuple[str, str], Counter] = defaultdict(Counter)
     commas = 0
     plain = 0
+    extra = {T.normalise(t) for t in ctx.terms}
 
     for src in ctx.doc.files:
         prose = ctx.doc.prose_of_file(src.rel)
@@ -696,50 +723,67 @@ def units(ctx: Ctx) -> CraftReport:
             raw = m.group("num")
             if "," in raw:
                 commas += 1
-            elif len(raw.split(".")[0]) > 3:
+            elif len(raw.lstrip("-−").split(".")[0]) > 3:
                 plain += 1
-            unit = m.group("unit").lower()
-            dim = dimension(unit)
-            span = Span(src.rel, m.start(), m.end())
-            styles[dim][m.group("unit")] += 1
-            subject = _quantity_before(prose, m.start(), ctx)
-            if not subject:
-                continue
-            seen[f"{subject}|{dim}"].append(
-                (raw, unit, m.group(0), span))
+            unit = m.group("unit")
+            found = unit_key(unit)
+            if found is not None:
+                # Spelling variants of ONE unit (Nm, N·m, nm), never two
+                # units of one dimension: mm and m are both right, and so
+                # are °C and °F in a recipe that gives both.
+                styles[found][unit] += 1
+        for q in quantities(prose, extra):
+            span = Span(src.rel, q.start, q.end)
+            sid = _sid(ctx, span) or ""
+            seen[q.key].append((q.number, q.unit, q.text, span, sid))
 
     for key, rows in seen.items():
+        obj, quantity, dim = key.split("|", 2)
         pairs = [(a, b) for i, a in enumerate(rows) for b in rows[i + 1:]
                  if conflict(a[0], a[1], b[0], b[1])]
         if not pairs:
             continue
-        subject, dim = key.split("|", 1)
-        values = sorted({r[2] for pair in pairs for r in pair})
-        first = min((r[3] for pair in pairs for r in pair),
-                    key=lambda sp: (sp.path, sp.start))
-        rep.findings.append(Finding(
-            "units", DEFECT,
-            f"“{subject}” is given {len(values)} different values",
-            "Two values for one named quantity is a contradiction "
-            "somewhere. Compared at the precision each was written to, so "
-            "this is neither a units mismatch nor a rounding difference — "
-            "the numbers really differ.",
-            span=first, section_id=_sid(ctx, first),
-            evidence=[f"{_label(ctx, r[3])}: {r[2]}"
-                      for pair in pairs[:2] for r in pair],
-            data={"subject": subject, "dimension": dim, "values": values}))
+        bare = not obj
+        if bare:
+            same = [(a, b) for a, b in pairs if a[4] == b[4]]
+            across = [(a, b) for a, b in pairs if a[4] != b[4]]
+        else:
+            same, across = pairs, []
+        name = f"{obj} {quantity}".strip() if obj else quantity
+        for group, severity in ((same, DEFECT), (across, WARN)):
+            if not group:
+                continue
+            values = sorted({r[2] for pair in group for r in pair})
+            first = min((r[3] for pair in group for r in pair),
+                        key=lambda sp: (sp.path, sp.start))
+            detail = (
+                "Two values for one named quantity is a contradiction "
+                "somewhere. Compared at the precision each was written to, "
+                "so this is neither a units mismatch nor a rounding "
+                "difference — the numbers really differ."
+                if severity == DEFECT else
+                f"Different sections give the {quantity} different values, "
+                f"and neither says what it is the {quantity} OF, so these "
+                f"may be two different parts. Name each one (“the "
+                f"{quantity} for the lid bolts”) and this check can tell.")
+            rep.findings.append(Finding(
+                "units", severity,
+                f"“{name}” is given {len(values)} different values",
+                detail, span=first, section_id=_sid(ctx, first),
+                evidence=[f"{_label(ctx, r[3])}: {r[2]}"
+                          for pair in group[:2] for r in pair],
+                data={"subject": name, "dimension": dim, "values": values}))
 
-    for dim, counter in styles.items():
+    for (dim, _factor), counter in styles.items():
         if len(counter) > 1 and sum(counter.values()) >= 4:
             variants = ", ".join(f"{n}×{c}" for n, c in
-                                 counter.most_common())
-            if len({n.lower() for n in counter}) > 1:
-                rep.findings.append(Finding(
-                    "units", WARN,
-                    f"{dim.title()} is written several ways: {variants}",
-                    "Pick one symbol and use it. A reader scanning for a "
-                    "figure searches for the symbol, not the dimension.",
-                    data={"dimension": dim, "forms": dict(counter)}))
+                                 sorted(counter.items()))
+            rep.findings.append(Finding(
+                "units", WARN,
+                f"One {dim} unit is written several ways: {variants}",
+                "Pick one symbol and use it. A reader scanning for a "
+                "figure searches for the symbol, not the dimension.",
+                data={"dimension": dim, "forms": dict(counter)}))
     if commas and plain:
         rep.findings.append(Finding(
             "units", NOTE,
@@ -749,25 +793,3 @@ def units(ctx: Ctx) -> CraftReport:
             data={"grouped": commas, "plain": plain}))
     rep.metrics["quantities"] = sum(len(v) for v in seen.values())
     return rep
-
-
-def _quantity_before(prose: str, at: int, ctx: Ctx) -> str:
-    """The quantity word governing a number, looking both ways.
-
-    `torque of 40 Nm`, `torque: 40 Nm`, `40 Nm of torque`, `tighten the
-    bolt to 40 Nm` (which finds nothing, correctly — an unnamed number is
-    not a claim about a named quantity and guessing one would manufacture
-    conflicts).
-    """
-    extra = {T.normalise(t) for t in ctx.terms}
-    before = prose[max(0, at - 60):at]
-    after = prose[at:at + 60]
-    words_before = [T.normalise(w) for w in T.word_list(before)]
-    for word in reversed(words_before[-6:]):
-        if word in QUANTITY_WORDS or word in extra:
-            return word
-    words_after = [T.normalise(w) for w in T.word_list(after)][:5]
-    for word in words_after:
-        if word in QUANTITY_WORDS or word in extra:
-            return word
-    return ""

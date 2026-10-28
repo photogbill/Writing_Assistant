@@ -125,17 +125,37 @@ def candidates(doc, cast: list[str], terms: list[str],
     named = list(dict.fromkeys([*cast, *terms]))
     if named:
         return named
+    from ..cast import CALENDAR, calendar_use
     counts: defaultdict[str, int] = defaultdict(int)
+    dates: defaultdict[str, int] = defaultdict(int)
     surface: dict[str, str] = {}
     for src in doc.files:
         prose = doc.prose_of_file(src.rel)
         for m in re.finditer(r"\b[A-Z][a-z]{3,}(?:[- ][A-Z][a-z]{2,})?\b",
                              prose):
-            word = m.group(0)
+            word, start = m.group(0), m.start()
+            parts = re.split(r"[- ]", word, maxsplit=1)
+            #: A two-word name only when its FIRST word could start one.
+            #: "Then Mira left. When Mira returned… After Mira read it… On
+            #: Tuesday Mira rode" used to give the threads `Then Mira`,
+            #: `When Mira`, `After Mira` and `Tuesday Mira` — and name
+            #: drift then proposed "Then Mira" and "When Mira" as one
+            #: person spelt two ways.
+            if len(parts) == 2 and " " in word and (
+                    T.is_common(parts[0])
+                    or parts[0].lower() in CALENDAR):
+                word, start = parts[1], m.start() + len(parts[0]) + 1
+                if len(word) < 4:
+                    continue
             if T.is_common(word):
                 continue
             key = T.term_key(word)
             counts[key] += 1
+            if word.lower() in CALENDAR and calendar_use(
+                    prose, start, start + len(word)):
+                dates[key] += 1
             surface.setdefault(key, word)
+    for key in [k for k, n in dates.items() if n * 2 >= counts[k]]:
+        del counts[key]
     return [surface[k] for k, n in
             sorted(counts.items(), key=lambda kv: -kv[1]) if n >= minimum][:60]

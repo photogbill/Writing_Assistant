@@ -32,11 +32,66 @@ from ..types import LYRICS, NOTE, WARN, CraftReport, Finding, Span
 from . import ANY_LANGUAGE, Ctx, check
 from .shared import describe
 
-#: A performance tag on its own line — `[Chorus]`, `(Verse 2)`, `## Bridge`
-#: — the way lyrics are written for a singer or for a generator.
-_TAG = re.compile(r"^\s*[\[\(]([^\]\)]{1,40})[\]\)]\s*$")
+#: The names of the parts of a song. A PARENTHESISED line is a tag only
+#: when it names one of these: `(Chorus)` is a tag and `(rise again)` is a
+#: backing vocal, which used to be read as a tag — every `(ooh)` started a
+#: new "section" and split the refrain it was sung over.
+SECTION_NAMES = (
+    "verse", "chorus", "pre-chorus", "prechorus", "post-chorus", "refrain",
+    "bridge", "intro", "outro", "hook", "coda", "interlude", "breakdown",
+    "instrumental", "solo", "tag", "drop", "rap", "spoken", "middle eight",
+    "middle 8", "final chorus", "outro chorus", "vamp", "turnaround")
+_SECTION_NAME = re.compile(
+    r"^(?:" + "|".join(re.escape(n) for n in SECTION_NAMES) +
+    r")(?:\s*[\d]+|\s+[ivx]+)?(?:\s*[:\-–—]\s*.{0,30}|\s*[x×]\s*\d+)?$",
+    re.IGNORECASE)
+
+#: A performance tag on its own line — `[Chorus]`, `(Verse 2)` — the way
+#: lyrics are written for a singer or for a generator. A `## Chorus`
+#: HEADING is a tag too, but the manuscript makes a section of it, so the
+#: refrain check reads it from the section title (`_tag_of_title`).
+_BRACKET = re.compile(r"^\s*\[([^\]]{1,40})\]\s*$")
+_PAREN = re.compile(r"^\s*\(([^)]{1,40})\)\s*$")
 
 _VOWELS = "aeiouy"
+
+
+class _TagMatch:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def group(self, _n: int = 1) -> str:
+        return self._name
+
+
+class _Tags:
+    """`_TAG.match(line)`, kept as the one spelling the checks use."""
+
+    @staticmethod
+    def match(text: str):
+        m = _BRACKET.match(text)
+        if m:
+            return _TagMatch(m.group(1))
+        m = _PAREN.match(text)
+        if m and _SECTION_NAME.match(m.group(1).strip()):
+            return _TagMatch(m.group(1))
+        return None
+
+
+_TAG = _Tags()
+
+
+def is_aside(text: str) -> bool:
+    """A whole line in parentheses that is NOT a tag: a backing vocal,
+    an ad-lib. Sung, but not the lead line — it neither counts toward the
+    line's syllables nor breaks the stanza it is sung over."""
+    return bool(_PAREN.match(text)) and _TAG.match(text) is None
+
+
+def _tag_of_title(title: str) -> str:
+    """`## Chorus` → "chorus"; a heading that is not a part's name → ""."""
+    title = (title or "").strip()
+    return _tag_name(title) if _SECTION_NAME.match(title) else ""
 
 
 def lines_of(ctx: Ctx, sec) -> list[tuple[int, int, str]]:
@@ -54,7 +109,7 @@ def lines_of(ctx: Ctx, sec) -> list[tuple[int, int, str]]:
     body = prose[sec.body.start:sec.body.end]
     for raw in body.splitlines(keepends=True):
         text = raw.strip()
-        if text and not _TAG.match(text):
+        if text and not _TAG.match(text) and not is_aside(text):
             lead = len(raw) - len(raw.lstrip())
             out.append((pos + lead, pos + lead + len(text), text))
         pos += len(raw)
@@ -65,12 +120,28 @@ def syllables_in(text: str) -> int:
     return sum(T.syllables(w) for w in T.word_list(text))
 
 
+def _is_vowel(word: str, i: int) -> bool:
+    # `y` is a vowel except where it starts the word ("yes", "young"), and
+    # the `u` of `qu` is a consonant ("queen" rhymes with "between").
+    if word[i] not in _VOWELS:
+        return False
+    if word[i] == "y" and i == 0:
+        return False
+    return not (word[i] == "u" and i > 0 and word[i - 1] == "q")
+
+
 def rhyme_key(line: str) -> str:
     """A spelling-based rhyme key for a line's last word.
 
-    The final vowel group and everything after it. `night` -> `ight`,
-    `above` -> `ove`, `river` -> `er`. It is an approximation of a sound
-    and every finding that uses it says so.
+    The final vowel GROUP and everything after it. `night` -> `ight`,
+    `rain` -> `ain`, `day` -> `ay`, `river` -> `er`; and a silent final
+    `e` is looked through, so `above`/`love` -> `ove` and `fire`/`desire`
+    -> `ire`. It is an approximation of a sound and every finding that
+    uses it says so.
+
+    It used to take the last vowel LETTER: `rain` -> `in`, so rain rhymed
+    with skin, and `day` -> `y` (padded to `day`), so day never rhymed
+    with way.
     """
     words = T.word_list(line)
     if not words:
@@ -78,13 +149,26 @@ def rhyme_key(line: str) -> str:
     word = T.normalise(words[-1]).strip("'-")
     if len(word) < 2:
         return word
+    end = len(word)
+    # Look through a silent final e (and -es): consonant + e at the end of
+    # a word with a vowel before it.
+    for tail in ("es", "e"):
+        cut = len(word) - len(tail)
+        if (word.endswith(tail) and cut >= 2 and not _is_vowel(word, cut - 1)
+                and any(_is_vowel(word, j) for j in range(cut - 1))):
+            end = cut - 1
+            break
     last = -1
-    for i, ch in enumerate(word):
-        if ch in _VOWELS:
+    for i in range(end - 1, -1, -1):
+        if _is_vowel(word, i):
             last = i
+            break
     if last < 0:
-        return word[-2:]
-    key = word[last:]
+        return word[-3:]
+    first = last
+    while first > 0 and _is_vowel(word, first - 1):
+        first -= 1
+    key = word[first:]
     return key if len(key) >= 2 else word[-3:]
 
 
@@ -111,7 +195,9 @@ def stanzas(ctx: Ctx, sec) -> list[list[tuple[int, int, str]]]:
     body = prose[sec.body.start:sec.body.end]
     for raw in body.splitlines(keepends=True):
         text = raw.strip()
-        if not text or _TAG.match(text):
+        if text and is_aside(text):
+            pass                     # sung over the stanza, not part of it
+        elif not text or _TAG.match(text):
             if current:
                 groups.append(current)
                 current = []
@@ -225,13 +311,35 @@ def refrain(ctx: Ctx) -> CraftReport:
     for tag, blocks in tagged.items():
         if len(blocks) < 2:
             continue
-        first_id, first = blocks[0]
-        for n, (section_id, other) in enumerate(blocks[1:], 2):
-            if abs(len(other) - len(first)) > 1:
+        # THE REFERENCE IS THE MAJORITY, NOT THE FIRST (2026-10-28). When
+        # the first chorus was the one that drifted, every correct repeat
+        # after it was reported as the error. Each line is compared with
+        # the version most occurrences agree on; with only two, or no
+        # majority, the first occurrence stands in and the evidence says
+        # "first:" rather than claiming a consensus that is not there.
+        lengths = Counter(len(group) for _sid, group in blocks)
+        size = max(lengths.items(), key=lambda kv: (
+            kv[1], -[len(g) for _s, g in blocks].index(kv[0])))[0]
+        alike = [(n, sid, group) for n, (sid, group) in
+                 enumerate(blocks, 1) if abs(len(group) - size) <= 1]
+        model = next(group for _n, _sid, group in alike if len(group) == size)
+        reference: list[tuple[str, bool]] = []
+        for i in range(size):
+            versions = Counter(_flat(group[i][2]) for _n, _sid, group in alike
+                               if i < len(group))
+            text, count = versions.most_common(1)[0]
+            if count * 2 > sum(versions.values()) and len(alike) >= 3:
+                shown = next(group[i][2] for _n, _sid, group in alike
+                             if i < len(group) and _flat(group[i][2]) == text)
+                reference.append((shown, True))
+            else:
+                reference.append((model[i][2], False))
+        for n, (section_id, other) in enumerate(blocks, 1):
+            if abs(len(other) - size) > 1:
                 rep.findings.append(Finding(
                     "refrain", NOTE,
                     f"“{tag}” has {len(other)} lines here and "
-                    f"{len(first)} the first time",
+                    f"{size} elsewhere",
                     "A repeated section of a different length. "
                     "Deliberate in a final chorus and an accident "
                     "everywhere else.",
@@ -249,24 +357,28 @@ def refrain(ctx: Ctx) -> CraftReport:
             # words every time — and reporting those four lines was this
             # check's first output and its first false positive.
             changed = [i for i, (_s, _e, text) in enumerate(other)
-                       if i < len(first)
-                       and _flat(text) != _flat(first[i][2])]
+                       if i < size and _flat(text) != _flat(reference[i][0])]
             if len(changed) > max(1, len(other) // 3):
                 continue
             for i in changed:
                 start, end, text = other[i]
-                was = first[i][2]
+                was, agreed = reference[i]
+                if not agreed and other is model:
+                    continue           # the stand-in cannot differ from itself
                 drifted += 1
                 sec = ctx.doc.section(section_id)
+                where = (f"on repeat {n}" if n > 1 else
+                         "the first time it is sung")
                 rep.findings.append(Finding(
                     "refrain", WARN,
-                    f"“{tag}” line {i + 1} differs on repeat {n}",
+                    f"“{tag}” line {i + 1} differs {where}",
                     "A refrain that does not repeat exactly. Invisible "
                     "on the page — the reader already knows the line — "
                     "and the first thing a singer finds.",
                     span=Span(sec.path if sec else "", start, end),
                     section_id=section_id,
-                    evidence=[f"first: {was}", f"repeat {n}: {text}"],
+                    evidence=[f"{'everywhere else' if agreed else 'first'}:"
+                              f" {was}", f"occurrence {n}: {text}"],
                     data={"tag": tag, "occurrence": n, "line": i + 1,
                           "first": was, "then": text}))
     rep.metrics["refrain_tags"] = {k: len(v) for k, v in tagged.items()}
@@ -287,12 +399,18 @@ def _tagged_stanzas(ctx: Ctx, sec):
     prose = ctx.doc.prose_of_file(sec.path)
     body = prose[sec.body.start:sec.body.end]
     out: list[tuple[str, list]] = []
-    tag = ""
+    # A `## Chorus` heading is the tag of what is under it. The heading is
+    # masked out of the prose, so without this every stanza under one had
+    # no tag at all and was never compared.
+    tag = _tag_of_title(sec.title)
     current: list = []
     pos = sec.body.start
     for raw in body.splitlines(keepends=True):
         text = raw.strip()
         m = _TAG.match(text) if text else None
+        if text and is_aside(text):
+            pos += len(raw)
+            continue
         if m:
             if current:
                 out.append((tag, current))

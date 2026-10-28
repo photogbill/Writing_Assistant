@@ -160,6 +160,11 @@ class CraftReport:
     findings: list[Finding] = field(default_factory=list)
     ran: list[str] = field(default_factory=list)
     skipped: dict[str, str] = field(default_factory=dict)
+    #: Checks that RAN and could not say anything, with the reason — "1
+    #: chapter found, pacing compares against your median". Not `skipped`
+    #: (the curve was still measured) and not silence, which reads as a
+    #: clean bill of health.
+    quiet: dict[str, str] = field(default_factory=dict)
     #: Seconds per check. Not decoration: a pass on an offloaded machine
     #: is meant to be slow, so the operator needs to see WHERE the time
     #: went rather than guess whether it has hung.
@@ -176,6 +181,7 @@ class CraftReport:
         self.findings.extend(other.findings)
         self.ran.extend(other.ran)
         self.skipped.update(other.skipped)
+        self.quiet.update(other.quiet)
         self.timing.update(other.timing)
 
 
@@ -478,6 +484,17 @@ class Hunk:
     old_span: tuple[int, int] = (0, 0)
     new_span: tuple[int, int] = (0, 0)
     id: int = 0
+    #: The whitespace AFTER each sentence in `old` / `new`, in its own text
+    #: (the text's tail for its last sentence). `diff.apply` rebuilds from
+    #: these rather than guessing a separator — see its docstring.
+    old_gaps: list[str] = field(default_factory=list)
+    new_gaps: list[str] = field(default_factory=list)
+    #: Whitespace before each text's first sentence, and whether this hunk
+    #: holds each text's LAST sentence.
+    old_lead: str = ""
+    new_lead: str = ""
+    old_tail: str = ""
+    new_tail: str = ""
 
     @property
     def changed(self) -> bool:

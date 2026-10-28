@@ -46,6 +46,12 @@ def diff(old: str, new: str) -> list[Hunk]:
     """Hunks from `old` to `new`, with char spans into both."""
     old_sents, old_spans = split(old)
     new_sents, new_spans = split(new)
+    old_gaps = _gaps(old, old_spans)
+    new_gaps = _gaps(new, new_spans)
+    old_lead = old[:old_spans[0][0]] if old_spans else old
+    new_lead = new[:new_spans[0][0]] if new_spans else new
+    old_tail = old[old_spans[-1][1]:] if old_spans else ""
+    new_tail = new[new_spans[-1][1]:] if new_spans else ""
     matcher = difflib.SequenceMatcher(
         None, [_norm(s) for s in old_sents], [_norm(s) for s in new_sents],
         autojunk=False)
@@ -55,8 +61,20 @@ def diff(old: str, new: str) -> list[Hunk]:
             op=op, old=old_sents[i1:i2], new=new_sents[j1:j2],
             old_span=_bounds(old_spans, i1, i2, len(old)),
             new_span=_bounds(new_spans, j1, j2, len(new)),
-            id=len(hunks)))
+            id=len(hunks), old_gaps=old_gaps[i1:i2],
+            new_gaps=new_gaps[j1:j2], old_lead=old_lead, new_lead=new_lead,
+            old_tail=old_tail, new_tail=new_tail))
     return hunks
+
+
+def _gaps(text: str, spans: list[tuple[int, int]]) -> list[str]:
+    """The whitespace after each sentence, up to the next one (or the end
+    of the text, for the last)."""
+    out = []
+    for k, (_s, e) in enumerate(spans):
+        nxt = spans[k + 1][0] if k + 1 < len(spans) else len(text)
+        out.append(text[e:nxt])
+    return out
 
 
 def _bounds(spans: list[tuple[int, int]], a: int, b: int,
@@ -88,37 +106,74 @@ def apply(old: str, hunks: list[Hunk], accepted: set[int] | None = None
     is only ever used by a test — in the workshop the set comes from the
     author clicking, one hunk at a time.
 
-    THE WHITESPACE IS THE WHOLE DIFFICULTY. Sentence spans exclude the
-    space BETWEEN sentences, so a naive rebuild produced `Four.Five.` for
-    an accepted insertion at the end and a double space for an accepted
-    deletion in the middle. Both are silent corruption of the author's
-    text by a feature whose entire promise is that it does not corrupt the
-    author's text, so the separators are handled explicitly here rather
-    than left to the spans.
+    THE WHITESPACE IS THE WHOLE DIFFICULTY, and the first two versions of
+    this got it wrong. Sentence spans exclude the space BETWEEN sentences,
+    and the old rebuild invented one — a single space — wherever a taken
+    hunk met the text around it. Measured 2026-10-28, five of six ordinary
+    edits came back corrupted: `One. Two.Three.`, `One.Two. Three.`, a
+    deleted paragraph leaving four newlines, an inserted paragraph glued on
+    as `B two.C three.`, a deleted last sentence leaving a trailing space.
+    Silent corruption by the one feature whose promise is that it does not
+    corrupt the author's text.
+
+    Now every sentence carries the whitespace that FOLLOWED it in its own
+    text, and the rebuild never invents a separator:
+
+    * between two sentences that were neighbours in the same text, the
+      separator they had;
+    * where the rebuild jumps (a deletion, or old text meeting new), the
+      separator after the first — unless that was its text's ending, in
+      which case the separator before the second;
+    * the lead and the tail come from whichever text the first and last
+      hunks were taken from.
+
+    `apply(old, diff(old, new)) == new` is a property test now, over
+    random paragraph, heading and blank-line edits.
     """
-    out: list[str] = []
-    cursor = 0
-    for hunk in hunks:
-        start, end = hunk.old_span
-        if start > cursor:
-            out.append(old[cursor:start])
-        cursor = max(cursor, end)
-        take = accepted is None or hunk.id in accepted
-        if hunk.op == EQUAL or not take:
-            out.append(old[start:end])
-            continue
-        replacement = " ".join(s.strip() for s in hunk.new if s.strip())
-        if not replacement:
-            # A deletion: drop the sentence AND the separator that
-            # followed it, or the text keeps a widow space.
-            while cursor < len(old) and old[cursor] in " \t":
-                cursor += 1
-            continue
-        joined = "".join(out)
-        if joined and not joined[-1].isspace() and not replacement[0].isspace():
-            out.append(" ")
-        out.append(replacement)
-    out.append(old[cursor:])
+    if not hunks:
+        return old
+
+    def taken(hunk: Hunk) -> bool:
+        return hunk.op != EQUAL and (accepted is None or hunk.id in accepted)
+
+    # The hunk holding each text's LAST sentence: its trailing gap is that
+    # text's ending, not a separator owed to anything.
+    last_old = max((i for i, h in enumerate(hunks) if h.old), default=-1)
+    last_new = max((i for i, h in enumerate(hunks) if h.new), default=-1)
+
+    pieces: list[tuple[str, str | None]] = []    # sentence, separator owed
+    for index, hunk in enumerate(hunks):
+        use_new = taken(hunk)
+        sents = hunk.new if use_new else hunk.old
+        gaps = hunk.new_gaps if use_new else hunk.old_gaps
+        if len(gaps) != len(sents):              # a Hunk built elsewhere
+            gaps = [" "] * len(sents)
+        nxt = hunks[index + 1] if index + 1 < len(hunks) else None
+        for k, sentence in enumerate(sents):
+            if k + 1 < len(sents):
+                pieces.append((sentence, gaps[k]))
+                continue
+            # The separator after this hunk's last sentence. An unchanged
+            # stretch followed by a TAKEN change is crossing into the new
+            # text, so it owes the NEW text's separator — which is what
+            # keeps the paragraph break when the last sentence of a
+            # paragraph is deleted.
+            if (hunk.op == EQUAL and nxt is not None and taken(nxt)
+                    and len(hunk.new_gaps) == len(hunk.new)):
+                gap, ends = hunk.new_gaps[-1], index == last_new
+            else:
+                gap = gaps[-1]
+                ends = index == (last_new if use_new else last_old)
+            pieces.append((sentence, None if ends else gap))
+
+    out = [hunks[0].new_lead if taken(hunks[0]) else hunks[0].old_lead]
+    for k, (sentence, _owed) in enumerate(pieces):
+        if k:
+            out.append(pieces[k - 1][1] or " ")
+        out.append(sentence)
+    if pieces:
+        out.append(hunks[-1].new_tail if taken(hunks[-1])
+                   else hunks[-1].old_tail)
     return "".join(out)
 
 

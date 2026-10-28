@@ -25,6 +25,8 @@ text is opt-out per keystroke.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 
 from .. import fingerprint as FP
@@ -91,7 +93,12 @@ class Room:
         """Ask for a reading. Returns notes that can never be applied."""
         reply = self._ask(persona, text, context, claims, notes, cancel)
         body = (reply or "").strip()
-        if not body or body.strip().upper().startswith("NOTHING"):
+        #: CLEAN MEANS THE WORD, NOT A SENTENCE THAT STARTS WITH IT. The
+        #: personas are told to answer exactly NOTHING when there is nothing
+        #: to report; a critique that begins "Nothing in the earlier
+        #: chapters establishes who Hale is…" is a real note, and the old
+        #: prefix test threw it away as clean.
+        if not body or re.fullmatch(r"[\W_]*nothing[\W_]*", body, re.I):
             return Critique(persona.key, [], body)
         lines = [ln.strip(" -*•\t") for ln in body.splitlines()]
         return Critique(persona.key, [ln for ln in lines if ln], body)
@@ -114,7 +121,7 @@ class Room:
     # -- what the author took ---------------------------------------------
 
     def accepted(self, suggestion: Suggestion, influences, *, at: str = "",
-                 note: str = "") -> bool:
+                 note: str = "", taken: str = "") -> bool:
         """Record that the author took this text. Call it on ACCEPT.
 
         The host calls this at the moment the suggestion goes into the
@@ -131,10 +138,16 @@ class Room:
         that quietly disarms itself the more it is used is worse than
         none, because it reports success.
         """
-        if influences is None or not suggestion.text.strip():
+        #: `taken` is the part the author actually kept — the new side of
+        #: the hunks they ticked. Recording the WHOLE suggestion after a
+        #: partial accept meant `spans_in` found nothing in the manuscript
+        #: (the full text is not there) and the model's sentences stayed in
+        #: the style baseline.
+        text = taken if taken.strip() else suggestion.text
+        if influences is None or not text.strip():
             return False
         return influences.record(
-            suggestion.text, persona=suggestion.persona, at=at,
+            text, persona=suggestion.persona, at=at,
             note=note or suggestion.rationale)
 
     # -- the one place that talks to a model ------------------------------
