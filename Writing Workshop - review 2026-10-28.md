@@ -75,6 +75,67 @@
 > `Project.record_words`); only the ATK door is missing. And D30 was wrong
 > about `drafting.py` — it did log, through its own `_log()`.
 
+> **SECOND BUILD, 2026-10-28 (afternoon).** Bill: *"Let's build them
+> all."* Scope: everything on the "what's next" list — I1, I2, I4, the rest
+> of I7, I10–I13 and L2–L7, L9–L12. NOT built: I3's remaining half, I5, I6
+> beyond L8, I8, I9, I14. Each item carries a ✅ line. **Nothing was
+> committed.** Engine 1.3.0 → **1.4.0**, and ATK now requires 1.4.0.
+>
+> Tests: engine **368/368**; ATK **617 passed**, including
+> `tests/test_writing_features.py` (offscreen Qt pages against a real
+> project on disk) and `tests/test_structured_calls.py`. The GBNF grammars
+> were compiled with llama-cpp-python 0.3.16 in the container. Not run on
+> Windows, and no grammar has been run against a real model yet.
+>
+> Found while building, and fixed:
+> * "I Will Email You" was read as section "I" (any title starting with a
+>   capital letter and a space).
+> * A Suno tag longer than 40 characters was read as a sung line.
+> * `[Verse 2: Valkyrie, cold Heldentenor]` was a different section from
+>   `[Verse 1]`, so repeats were never compared.
+> * Read-aloud merged paragraphs into one passage and gave the whole
+>   exchange to the first speaker.
+> * A place written "the lighthouse" counted as named in any chapter with
+>   the word "the"; "Harbour Street" in any with "street". Places now need
+>   their whole name (article dropped), in the Draft check too.
+>
+> **Then an independent check of this build** (a reviewer that had not
+> written it, required to reproduce what it reported) found fifteen
+> problems. All are fixed and have tests:
+> * "Record voice type…" over a Storyline that could not be read (bad
+>   JSON, a sync tool holding the file) saved a one-character outline over
+>   the whole plan. It now refuses, and `storyline.json` is written
+>   atomically.
+> * Autosave wrote the SAVED concept over the unsaved one a crash had left.
+>   Filling the box no longer counts as typing, and an unsaved text that is
+>   not put back is moved to a name of its own first.
+> * Spec sheet → Rename on a "(not named)" row threw the quantity away
+>   ("torque" became the component and vanished).
+> * Read aloud read only the text above a chapter's first sub-heading;
+>   skipped lines that failed to speak and still said "done"; and would
+>   not join voices at 16 and 22.05 kHz (a mixed Piper cast). It now reads
+>   the whole chapter, converts formats, and refuses a chapter with a
+>   missing line or a voice the author did not choose.
+> * Model per stage decided whether to swap before taking the AI queue, so
+>   two routed jobs could run on the wrong model. It now decides inside
+>   the hold, refuses when Setup records no model to put back, swaps the
+>   local core only, and a model that could not be put back is the last
+>   line on the page, not covered by "Done."
+> * Cancel did nothing for three Draft jobs, and after a read-aloud batch
+>   did nothing for The Room.
+> * The Room could hand a passage into a Word file's read-only buffer.
+> * Lyric alignment compared verses across different songs in one file.
+> * `[Chorus x2]`, `[Verse II]` and a character called Bridget were
+>   "misspelt tags"; "over a heavy bass drop" was a voice-lock defect.
+> * The numbered `.docx` made code comments into headings.
+> * A checkbox was read on a worker thread; a lone speaker showed as
+>   "nearest voice at 0.0"; the outline report read chapters in list
+>   order; dictation during another job lost the recording's path.
+>
+> One behaviour to know: a stage with a model routed to it holds ATK's AI
+> line for its whole job (a priority ticket still steps in), so a routed
+> whole-book run keeps other AI work waiting.
+
 ---
 
 ## The short version
@@ -133,6 +194,8 @@ Fix: list `project.doctypes()` in the picker, resolve personas and
 `is_fiction` through `profile().base`, and add lyric personas (see I12).
 **For The Turing Accords this is the single most useful door to open.**
 
+✅ **L2 — built.** The Room → "Read chapters aloud…": pick chapters, a narrator voice, and a voice per speaker; each speaker's voice type on record is shown beside them, and anyone without a voice is named before anything runs (they fall back to the narrator, said so). Each chapter, sub-sections included, goes through the render queue line by line and is joined into one WAV under the project's `audio\\` folder (voices at different sample rates are converted). A chapter with a line that could not be spoken, or a voice Piper replaced with its default, is refused and named, never joined with a hole in it. A paragraph now always ends a passage.
+
 **L2. Chapter read-aloud as a batch was never connected.**
 `readaloud.chapter_jobs` / `render_job` have no caller. The design
 decision was *"chapters as a batch through render_queue — queue, walk away,
@@ -140,13 +203,19 @@ listen on headphones."* Today The Room reads at most 2,000 characters, in
 one voice, and never calls `assign_voices`, so the per-character voices and
 the voice-type rule never apply.
 
+✅ **L3 — built.** Manuscript → "What would fit?" reads the model headers in your folders (on demand, never at start-up) and adds *"Load X for N tokens — and the whole manuscript fits"* under the meter.
+
 **L3. The Budget Meter's third line.** `writing_host.alternatives()`
 (*"Load Qwythos-9B for 75,448 and the whole manuscript fits"*) is written
 and never called. One button beside the meter.
 
+✅ **L4 — built.** Author Styles → "New from text…" fits a profile from sample files you choose, through `authors.fit_profile`.
+
 **L4. Fitting an author profile straight from text.** `authors.fit_profile`
 still has no caller, as on the 2026-09-10 inventory. Author Styles can fit
 only from the open manuscript's fingerprint.
+
+✅ **L5 — built.** Craft → "Does everybody sound the same?" — `fingerprint.speaker_report`: each speaker's nearest other voice, pairs closer than 1.0, and who has too little dialogue to measure. Only the words inside quotes are measured now. `by_group` and `chronology.durations` still have no caller.
 
 **L5. "Does everybody in this book sound the same?"**
 `fingerprint.by_speaker` (a fingerprint per character from their dialogue)
@@ -154,9 +223,13 @@ is reachable from the CLI (`workshop fingerprint --speakers`) but not from
 ATK. `by_group` (separate baselines for procedures vs explanation) has no
 caller anywhere.
 
+✅ **L6 — built.** The Room and Versions mark the changed words inside a one-for-one replaced sentence (`diff.inline`); everything shown is escaped.
+
 **L6. Word-level highlighting inside a changed sentence.** `diff.inline`
 exists and nothing uses it. The Room and Versions show whole sentences.
 `chronology.durations` is likewise uncalled.
+
+✅ **L7 — built.** Versions → Export offers "Shunn manuscript format (.docx)" (Courier New 12 pt, double-spaced, 1" margins, contact block, *about N words*, running header with a PAGE field from page 2, a page per chapter, centred `#`, THE END) and "Numbered + contents (.docx)" (Word headings, real tables, code blocks kept as code, and a TOC field — Word fills it on "Update field"). Needs python-docx; without it the page says so.
 
 **L7. `.docx` export is one step short.** Versions → Export writes `.md`
 only, and the status line tells you to put it through ATK's report exporter
@@ -175,9 +248,13 @@ tracking the same way.
 
 ### Planned, never started
 
+✅ **L9 — built.** Storyline → "Models per stage…": a model for Storyline passes, drafting, reading claims and The Room. A routed job holds the AI queue for the whole job, decides inside it whether to swap, and puts yours back with Setup's exact settings (unless you untick that) — and always when the stage's model fails to load. Refused when Setup records no model to put back. Never with the online core. Author Styles rewrites and Continuity are not routed.
+
 **L9. Model routing per stage** (plan §4b): outline on a 24B, continuity on a
 9B with the whole book in view, extraction on a small grammar-constrained
 model. Nothing in the workspace routes; one model does everything.
+
+✅ **L10 — built.** ATK's spellcheck is attached to the editor (your personal dictionary as before; the cast and terms are taught to it in memory on each refresh, nothing written). "Dictate" records through `VoiceRecorder` into ATK's temp folder, transcribes with Whisper using the cast as the prompt, and inserts at the cursor.
 
 **L10. Spell-check and dictation in the Manuscript editor.** The plan's
 audit counted both as already in ATK (`ui/spellcheck.py`, `VoiceRecorder` +
@@ -185,7 +262,11 @@ Whisper). Neither is used by `writing_panel.py`.
 
 ✏️ **L11 — correction.** The engine has it — `Project.targets` and `Project.record_words`. What is missing is only the ATK door. Not built.
 
+✅ **L11 — built.** A session bar under the editor: today's words against the daily target, the streak, and a timer with a session target ("Targets…"). The day starts from the manuscript's count when you first open it that day; words are recorded through `Project.record_words`.
+
 **L11. Session ritual** (plan §5): word-count target, a timer, a streak.
+
+✅ **L12 — built.** Storyline → "Places → map". Only a place's new "Where (real world)" field is placed — `lat, lon` as given, else ATK's offline gazetteer, else a single exact-name hit in the imported extract. The place NAME is never geocoded. Everything else goes to the map's unplaced rail with the reason. Nothing reaches the network.
 
 **L12. Research crossover** (plan §5): a novel's places on the Geospatial
 canvas.
@@ -650,12 +731,16 @@ The `install.bat` note was already closed.
 
 ## Part 3 — Improvements worth making
 
+✅ **I1 — built.** `atk/core/structured.py`: every Storyline pass, the scene and stretch plans and the harvest ask through a GBNF grammar (array or object, with an optional think block first) when the local engine can take one. Models that answer in channels (gpt-oss) are asked free first, with the grammar only if that does not parse. The online core and diffusion models go unconstrained, with `jsonish` as before. Each choice is logged.
+
 **I1. Constrained JSON for every structured pass.** `writing_host` already
 takes a `grammar=` argument, and llama.cpp supports GBNF and JSON schema.
 Every outline pass, the harvest and the stretch plan can be grammar-bound,
 which removes D16's whole class at the source; `jsonish` becomes the
 fallback. This is the plan's own §4b ("structure by grammar, not by
 parsing"), never applied to the Storyline/Draft half.
+
+✅ **I2 — built.** Prose calls prefill an empty think block (`<think>\n\n</think>` or Mistral's `[THINK][/THINK]`) where the template allows continuing a reply; otherwise they run as before. Draft → "Let it think first" turns it off, and is remembered.
 
 **I2. Don't let prose calls think.** Prefill an empty think block (or use
 the model's no-think switch) for drafting calls. The whole reply budget goes
@@ -667,6 +752,8 @@ reply budget, and drop sections in a fixed order (recall, far-back purposes,
 named-only cast, low-relevance facts), listing each in `omitted`. Send
 stretches a slim brief: chapter, scene, carry, the scene's cast. This
 matters more than anything else for 7–9B models.
+
+✅ **I4 — built** (the keying was the first build's D8). Codex → "Spec sheet…": every numeric claim as component, quantity, value, unit, where and state, with superseded values as history and conflicts marked. Double-click to open the passage; "Rename component…" revises a proposed claim and corrects an accepted one, so the history is kept. Export CSV to `exports\\`.
 
 **I4. Specs keyed by object, and a spec sheet.** Give each numeric claim an
 object ("lid bolts" + torque) and let the author merge or split keys in the
@@ -685,6 +772,8 @@ the brief, the carry and `check_draft`. This fixes L8 and D12 and most of
 D19 and D23 in one move. Feed the same lists to the chapters and scenes
 passes and require them to use those names.
 
+✅ **I7 — rest built.** A job banner on every page lists what is running, with Cancel. The Draft box and the Storyline concept autosave (2 s after typing stops) to `.workshop\\unsaved\\` and are offered back on the next open; one that is not put back is moved to a name of its own so nothing overwrites it; the copy is removed once you save.
+
 **I7. Workspace-level busy state and unsaved-work protection.** One banner
 listing running jobs, each with Cancel, and "Open project" disabled while
 any run. A dirty marker on the Manuscript tab, prompting on section change,
@@ -702,15 +791,21 @@ Clash-check traits only; render each state's *latest* value with its
 chapter, so chapter 12 is told where Mara is now, not where she was in
 chapter 1.
 
+✅ **I10 — built.** Double-click a Craft finding, a Continuity finding, a Codex claim or a spec-sheet row: the Manuscript page comes to the front with the passage selected.
+
 **I10. Click a finding, land on the passage.** Craft, Continuity and
 Reconsider results carry section ids and quotes; the editor opens at the top
 of the file. Double-click should open the file scrolled to the passage. The
 engine's `SourceFile.clickable` exists for this.
 
+✅ **I11 — built.** The Room → "Put into the editor ▸" replaces the passage in the Manuscript BUFFER if it is still there exactly once (one undo step); you still press Save. Refused, with the reason, for a section that holds a table, code or front matter, for a Word file (read-only in ATK), and when the passage has changed since.
+
 **I11. The Room hands off to the editor.** "Put into the editor" replaces
 the exact original passage in the Manuscript buffer if it still matches,
 and you still press Save. Two deliberate keystrokes, as now, without the
 copy-paste that D7 can corrupt.
+
+✅ **I12 — built.** `lyric_alignment` compares line by line across repeats of the same tag within each song (a note for two repeats, a warning against the median for three or more; a difference of `align_tolerance` is absorbed). The `suno` check: misspelled tags, two voices in one tag, a singer named without a voice, ALL-CAPS words (Roman numerals excepted), parenthetical ad-libs, a song titled with a character's name, style prompt over 1,000 and lyrics over 5,000 characters. `voice_locks`: a tag whose voice contradicts the voice type ON RECORD is a defect, and a character with none on record is named — never guessed. Voice types come from the Storyline, then the Music Workshop's character sheets; Craft → "Record voice type…" writes one to the Storyline, showing the character's history first. The Manuscript tree shows who sings each section and their recorded voice.
 
 **I12. Lyrics as a first-class type** (after L1):
 * Line-by-line syllable alignment across repeats of the same tag (verse 1
@@ -722,6 +817,8 @@ copy-paste that D7 can corrupt.
 * Each character's established voice type shown beside their section, never
   guessed. That is your standing rule, and `assign_voices` already enforces
   it.
+
+✅ **I13 — built.** Storyline → "Outline vs manuscript…": chapters with no file or not written, characters never named or first named in a different chapter than planned, a chapter's listed cast or place not named, threads never named, dropped before their last planned chapter, or named outside their plan. Read-only: the outline is not changed.
 
 **I13. Outline vs manuscript.** The Storyline already declares where each
 character first appears and which chapters a thread runs through. A report

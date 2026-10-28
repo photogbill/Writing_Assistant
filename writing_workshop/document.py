@@ -123,7 +123,12 @@ def newline_of(text) -> str:
     return "\r\n" if crlf and crlf >= lf else "\n"
 
 
-_NUMBERED = re.compile(r"^\s*((?:\d+|[A-Z])(?:\.\d+)*)[.)]?\s+(.*)$")
+#: The author's own section number. A LETTER counts only with punctuation
+#: or a sub-number ("A. Scope", "B) Wiring", "C.2 Fuses"): bare, it is the
+#: first word of a title — "# I Will Email You" was section "I", titled
+#: "Will Email You", and "# A Long Way Home" was appendix A.
+_NUMBERED = re.compile(
+    r"^\s*(\d+(?:\.\d+)*|[A-Z](?:\.\d+)+|[A-Z](?=[.)]))[.)]?\s+(.*)$")
 _SCENE_BREAK = re.compile(
     r"^\s*(\*\s*\*\s*\*|#\s*#\s*#|---|\* \* \*|#|~~~+)\s*$")
 
@@ -383,6 +388,19 @@ class Manuscript:
 
     def children(self, sec: Section) -> list[Section]:
         return [s for s in self.sections if s.parent_id == sec.id]
+
+    def subtree(self, sec: Section) -> list[Section]:
+        """`sec` and everything under it, in document order. A chapter
+        written with `## scene` headings is one chapter: its body ends at
+        the first sub-heading, so anything that reads "the chapter" from
+        `sec` alone reads only the text above that heading."""
+        inside = {sec.id}
+        out = [sec]
+        for s in self.sections:
+            if s.parent_id in inside and s.path == sec.path:
+                inside.add(s.id)
+                out.append(s)
+        return out
 
     def chapters(self) -> list[Section]:
         """Top-level sections — chapters in a novel, parts in a manual."""

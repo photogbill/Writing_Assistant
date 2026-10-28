@@ -24,6 +24,7 @@ from .reconsider import (
     for_claim,
 )
 from .select import DEFAULT_LIMIT, governing, index_claims
+from .spec import SpecRow, spec_sheet
 from .store import Codex
 
 __all__ = ["Codex", "make", "numeric_claims", "temporal_claims",
@@ -31,7 +32,8 @@ __all__ = ["Codex", "make", "numeric_claims", "temporal_claims",
            "base_value", "dimension", "propose", "parse", "CLAIMS_GBNF",
            "find", "for_claim", "ask_model", "Dependent", "DIRECT",
            "NEARBY", "MENTION", "deterministic", "governing",
-           "index_claims", "subjects_for", "DEFAULT_LIMIT"]
+           "index_claims", "subjects_for", "DEFAULT_LIMIT", "SpecRow",
+           "spec_sheet"]
 
 
 def subjects_for(doc, given=None) -> list[str]:

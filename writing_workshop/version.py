@@ -15,4 +15,11 @@
 #: (`Store.problems`, `Project.problems`, `Versions.problem`); craft reports
 #: say which checks had nothing to say (`CraftReport.quiet`). ATK requires
 #: this version (`atk.core.writing.MIN_ENGINE`).
-__version__ = "1.3.0"
+#:
+#: 1.4.0 — what was left to build. Lyrics are first-class: the `suno` and
+#: `voice_locks` checks (voice types read from the host's record, never
+#: guessed), `lyric_alignment`, tags with descriptors; `codex.spec_sheet`;
+#: `fingerprint.speaker_report`; read-aloud passages end at a paragraph;
+#: "I Will Email You" is no longer section "I". ATK's new pages call these,
+#: so ATK requires this version.
+__version__ = "1.4.0"

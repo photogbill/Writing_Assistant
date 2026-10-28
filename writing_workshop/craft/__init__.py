@@ -107,7 +107,8 @@ def _load() -> None:
     """
     if REGISTRY:
         return
-    from . import fiction, lyrics, rules, shared, technical  # noqa: F401
+    from . import (fiction, lyrics, rules, shared, suno,  # noqa: F401
+                   technical)
 
 
 def registry() -> dict[str, Registered]:

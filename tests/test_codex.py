@@ -385,6 +385,49 @@ class TheSweepStillSeesTheOldValue(TempProject):
             codex.close()
 
 
+class TheSpecSheet(unittest.TestCase):
+    """I4 (2026-10-28): every component, quantity and value in one table."""
+
+    def _claims(self):
+        from writing_workshop.types import Span
+        rows = [
+            ("lid bolts", "torque", "40 Nm", "accepted", "§3 para 1"),
+            ("lid bolts", "torque", "45 Nm", "proposed", "§5 para 2"),
+            ("wheel nuts", "torque", "110 Nm", "accepted", "§7 para 1"),
+            ("Lid Bolts", "torque", "38 Nm", "superseded", "§1 para 1"),
+            ("wheel nuts", "torque", "90 Nm", "rejected", "§9 para 1"),
+            ("supply", "voltage", "12 V", "proposed", "§2 para 1"),
+        ]
+        out = []
+        for i, (subject, pred, value, state, ref) in enumerate(rows, 1):
+            claim = CX.make(subject, pred, value, kind=NUMERIC,
+                            span=Span("a.md", i, i + 1), source_ref=ref)
+            claim.id, claim.state = i, state
+            out.append(claim)
+        return out
+
+    def test_rows_group_by_component_and_quantity(self):
+        rows = CX.spec_sheet(self._claims())
+        keys = [(r.component, r.quantity) for r in rows]
+        self.assertEqual(keys, [("lid bolts", "torque"),
+                                ("supply", "voltage"),
+                                ("wheel nuts", "torque")])
+        lid = rows[0]
+        self.assertTrue(lid.conflict)
+        self.assertEqual(lid.values, ["40 Nm", "45 Nm"])
+        self.assertTrue(any("38 Nm" in h for h in lid.history))
+        nuts = rows[2]
+        self.assertEqual(nuts.values, ["110 Nm"])     # rejected left out
+        self.assertFalse(nuts.conflict)
+
+    def test_csv_has_a_line_per_value(self):
+        from writing_workshop.codex import spec as SP
+        text = SP.to_csv(CX.spec_sheet(self._claims()))
+        self.assertEqual(text.splitlines()[0].split(",")[0], "component")
+        self.assertIn("lid bolts,torque,45 Nm,Nm,§5 para 2,proposed,yes,2",
+                      text)
+
+
 class SharedBetweenThreads(TempProject):
     """2026-10-28. The host opens the Codex on its GUI thread and uses it
     from background jobs. With sqlite's default `check_same_thread=True`

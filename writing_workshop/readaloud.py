@@ -94,20 +94,28 @@ def passages(doc, sec, *, max_chars: int = MAX_PASSAGE_CHARS,
     their prose that is really a problem in the split.
     """
     prose = doc.prose_of_file(sec.path)
-    body = prose[sec.body.start:sec.body.end]
     names = set(cast or [])
     out: list[Line] = []
-    buf: list[tuple[int, int]] = []
-    size = 0
-    for start, end in T.sentences(body, base=sec.body.start):
-        length = end - start
-        if buf and size + length > max_chars:
+    # A PARAGRAPH ALWAYS ENDS A PASSAGE (2026-10-28). Passages used to run
+    # across paragraphs up to `max_chars`, and a passage takes ONE speaker —
+    # so in an exchange of short lines the whole run was read in the first
+    # speaker's voice, and `fingerprint.by_speaker` measured everyone's
+    # lines as theirs. A new paragraph is a new speaker in prose, so it is
+    # a new passage here; only a paragraph longer than `max_chars` is split,
+    # on its sentences.
+    for para in doc.paragraphs(sec):
+        buf: list[tuple[int, int]] = []
+        size = 0
+        text = prose[para.span.start:para.span.end]
+        for start, end in T.sentences(text, base=para.span.start):
+            length = end - start
+            if buf and size + length > max_chars:
+                out.append(_line(doc, sec, prose, buf, names))
+                buf, size = [], 0
+            buf.append((start, end))
+            size += length
+        if buf:
             out.append(_line(doc, sec, prose, buf, names))
-            buf, size = [], 0
-        buf.append((start, end))
-        size += length
-    if buf:
-        out.append(_line(doc, sec, prose, buf, names))
     return out
 
 
@@ -163,7 +171,11 @@ def chapter_jobs(doc, out_dir: str | Path, *, cast: list[str] | None = None,
     jobs: list[Job] = []
     missing: list[str] = []
     for sec in (sections if sections is not None else doc.chapters()):
-        lines = passages(doc, sec, cast=cast)
+        # The chapter WITH its sub-sections: a section's body stops at the
+        # next heading of any level, so "# One / … / ## The quay / …" was
+        # read as its first paragraph alone (2026-10-28).
+        lines = [line for part in doc.subtree(sec)
+                 for line in passages(doc, part, cast=cast)]
         if not lines:
             continue
         lines, gaps = assign_voices(

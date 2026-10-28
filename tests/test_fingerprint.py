@@ -146,5 +146,50 @@ class TheAuthorIsNotAStranger(unittest.TestCase):
         self.assertNotIn("ttr", metrics)
 
 
+class EverybodySoundsTheSame(unittest.TestCase):
+    """L5 (2026-10-28): `by_speaker` fitted on the whole PASSAGE around a
+    line of speech — narration and all — so every character measured as
+    the narrator. And nothing turned the fingerprints into an answer."""
+
+    def _doc(self, a_line, b_line):
+        import tempfile
+        from pathlib import Path
+        from writing_workshop import Manuscript
+        import shutil
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        paras = []
+        for _ in range(40):
+            paras.append(f'"{a_line}" Mira said.')
+            paras.append(f'"{b_line}" Tomas said.')
+        (Path(tmp) / "01.md").write_text("# One\n\n" + "\n\n".join(paras),
+                                        encoding="utf-8")
+        return Manuscript.load(tmp)
+
+    def test_only_the_quoted_words_are_measured(self):
+        doc = self._doc("We go now, before the tide turns on us all.",
+                        "No.")
+        prints = FP.by_speaker(doc, ["Mira", "Tomas"], minimum_words=50)
+        self.assertIn("Mira", prints)
+        self.assertNotIn("Tomas", prints)   # forty "No."s is too little
+
+    def test_two_voices_written_alike_are_named(self):
+        same = "I think we should leave the harbour before the light goes."
+        report = FP.speaker_report(self._doc(same, same), ["Mira", "Tomas"],
+                                   minimum_words=50)
+        self.assertTrue(report["alike"], report["verdict"])
+        self.assertIn("sound alike", report["verdict"])
+
+    def test_a_lone_speaker_has_no_distance_not_zero(self):
+        """0.0 read as "indistinguishable from the nearest voice" — and
+        there was no nearest voice."""
+        report = FP.speaker_report(
+            self._doc("We go now, before the tide turns on us all.", "No."),
+            ["Mira", "Tomas"], minimum_words=50)
+        mira = [r for r in report["speakers"] if r["name"] == "Mira"][0]
+        self.assertIsNone(mira["distance"])
+        self.assertEqual(report["alike"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

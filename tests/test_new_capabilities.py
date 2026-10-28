@@ -466,6 +466,154 @@ Till you call my name again
         self.assertEqual(drifted[0].data["occurrence"], 1)
         self.assertIn("everywhere else", drifted[0].evidence[0])
 
+    # -- I12: lyrics as a first-class type (2026-10-28) ---------------------
+    SUNO = """# I Will Email You
+
+> Cold surgical Heldentenor aria, orchestral, 72 BPM
+
+[Verse 1: Valkyrie, cold surgical Heldentenor]
+I have read your quarterly report
+I have seen the numbers you resigned
+Every margin bends to my design
+
+[Verse 2: Valkyrie, bright soprano]
+I have read the minutes of your board
+And the hollow promises that you have signed in the dark
+Every quarter answers to my MIND
+
+[Chrous]
+I will email you (and you will read)
+
+[Verse 3: Sarah]
+I have read the letters that you sent
+And the second line is fine
+Every margin bends to my design
+
+[Chorus: Valkyrie and Sarah duet]
+I will email you
+"""
+
+    def _run(self, only, song=None, **options):
+        (self.root / "song.md").write_text(song or self.SUNO,
+                                           encoding="utf-8")
+        return run_craft(Manuscript.load(self.root), LYRICS, only=only,
+                         cast=["Valkyrie", "Sarah"], options=options)
+
+    def test_a_tag_with_its_singer_and_timbre_is_still_its_part(self):
+        from writing_workshop.craft.lyrics import _tag_name
+        self.assertEqual(_tag_name("Verse 1: Valkyrie, cold Heldentenor"),
+                         "verse")
+        self.assertEqual(_tag_name("Pre-Chorus"), "pre-chorus")
+        self.assertEqual(_tag_name("Chorus - Kael"), "chorus")
+
+    def test_a_title_starting_with_i_or_a_is_not_a_section_number(self):
+        (self.root / "song.md").write_text("# I Will Email You\n\nx\n",
+                                           encoding="utf-8")
+        doc = Manuscript.load(self.root)
+        self.assertEqual(doc.label(doc.sections[0]), "I Will Email You")
+
+    def test_lines_are_compared_slot_by_slot_across_repeats(self):
+        report = self._run(["lyric_alignment"])
+        found = [f for f in report.findings
+                 if f.check == "lyric_alignment"]
+        self.assertTrue(any(f.data["line"] == 2 and f.data["syllables"] == 14
+                            for f in found), [f.title for f in found])
+
+    def test_suno_formatting(self):
+        report = self._run(["suno"])
+        titles = " | ".join(f.title for f in report.findings)
+        self.assertIn("looks like [Chorus]", titles)
+        self.assertIn("ALL-CAPS", titles)
+        self.assertIn("MIND", titles)
+        self.assertIn("with (…) inside", titles)
+        self.assertIn("Two voices in one tag", titles)
+        self.assertIn("names Sarah but not the voice", titles)
+
+    def test_suno_limits_are_settings(self):
+        report = self._run(["suno"], suno_max_chars=100, suno_style_max=10)
+        titles = " | ".join(f.title for f in report.findings)
+        self.assertIn("Style prompt", titles)
+        self.assertIn("Lyric body", titles)
+
+    def test_a_voice_lock_is_checked_against_the_record_only(self):
+        report = self._run(["voice_locks"], voice_types={
+            "Valkyrie": "cold surgical Heldentenor"})
+        by = {(f.severity, f.data.get("name")) for f in report.findings}
+        self.assertIn(("defect", "Valkyrie"), by)      # sung as a soprano
+        self.assertIn(("note", "Sarah"), by)           # nothing on record
+        broken = [f for f in report.findings if f.severity == "defect"]
+        self.assertIn("Verse 2", broken[0].title)
+
+    def test_voice_families_are_compatible_with_their_neighbours(self):
+        from writing_workshop.craft.suno import compatible, voice_families
+        self.assertEqual(voice_families("teenage rock baritenor"),
+                         {"baritenor"})
+        self.assertTrue(compatible({"tenor"}, voice_families("Heldentenor")))
+        self.assertTrue(compatible({"baritone"}, {"baritenor"}))
+        self.assertFalse(compatible({"soprano"}, {"tenor"}))
+
+    # -- found by the independent check of the build (2026-10-28) ---------
+    def test_repeat_marks_and_roman_numerals_are_not_the_part(self):
+        from writing_workshop.craft.lyrics import _tag_name
+        for tag in ("Chorus x2", "Chorus ×2", "Chorus 2x"):
+            self.assertEqual(_tag_name(tag), "chorus", tag)
+        self.assertEqual(_tag_name("Verse II: Valkyrie, cold Heldentenor"),
+                         "verse")
+        self.assertEqual(_tag_name("Bridge x2"), "bridge")
+        (self.root / "song.md").write_text(
+            "# Song\n\n[Chorus x2]\nA line\n\n[Bridget]\nAnother\n",
+            encoding="utf-8")
+        report = run_craft(Manuscript.load(self.root), LYRICS, only=["suno"],
+                           cast=["Bridget"])
+        self.assertFalse([f for f in report.findings
+                          if "looks like" in f.title],
+                         [f.title for f in report.findings])
+
+    def test_a_misspelt_tag_is_still_found(self):
+        report = self._run(["suno"], song="# Song\n\n[Chrous]\nA line\n")
+        self.assertTrue(any("looks like [Chorus]" in f.title
+                            for f in report.findings))
+
+    def test_an_instrument_is_not_a_voice(self):
+        from writing_workshop.craft.suno import voice_families
+        self.assertEqual(voice_families("Mara, over a heavy bass drop"),
+                         set())
+        self.assertEqual(voice_families("tenor sax solo"), set())
+        self.assertEqual(voice_families("808 bass"), set())
+        self.assertEqual(voice_families("deep bass voice"), {"bass"})
+        self.assertEqual(voice_families("bass-baritone"), {"bass-baritone"})
+        song = ("# Song\n\n[Verse 1: Sarah, over a heavy bass drop]\n"
+                "A line\n")
+        report = self._run(["voice_locks"], song=song,
+                           voice_types={"Sarah": "mezzo"})
+        self.assertFalse([f for f in report.findings
+                          if f.severity == "defect"],
+                         [f.title for f in report.findings])
+
+    def test_alignment_is_per_song(self):
+        """Two songs in one file: song one's verses were warned against a
+        median song two's verses set."""
+        long_ = "Over the water the lanterns are burning so bright"
+        short = "Iron and dawn"
+        song = ("# Iron Dawn\n\n[Verse 1]\n" + short + "\n\n[Verse 2]\n"
+                + short + "\n\n# Lantern Song\n\n[Verse 1]\n" + long_
+                + "\n\n[Verse 2]\n" + long_ + "\n\n[Verse 3]\n" + long_
+                + "\n")
+        report = self._run(["lyric_alignment"], song=song)
+        self.assertEqual([f for f in report.findings
+                          if f.check == "lyric_alignment"], [],
+                         [f.title for f in report.findings])
+
+    def test_a_difference_of_the_tolerance_is_absorbed(self):
+        song = ("# Song\n\n[Verse 1]\nThe lamp was low tonight\n\n"
+                "[Verse 2]\nThe lamp was very low tonight\n")  # 6 vs 8
+        report = self._run(["lyric_alignment"], song=song)
+        self.assertEqual([f for f in report.findings
+                          if f.check == "lyric_alignment"], [])
+        report = self._run(["lyric_alignment"], song=song, align_tolerance=1)
+        self.assertTrue([f for f in report.findings
+                         if f.check == "lyric_alignment"])
+
     def test_syllables_per_line_are_measured(self):
         report = run_craft(Manuscript.load(self.root), LYRICS,
                            only=["lyric_lines"])

@@ -40,7 +40,10 @@ SECTION_NAMES = (
     "verse", "chorus", "pre-chorus", "prechorus", "post-chorus", "refrain",
     "bridge", "intro", "outro", "hook", "coda", "interlude", "breakdown",
     "instrumental", "solo", "tag", "drop", "rap", "spoken", "middle eight",
-    "middle 8", "final chorus", "outro chorus", "vamp", "turnaround")
+    "middle 8", "final chorus", "outro chorus", "vamp", "turnaround",
+    "pre chorus", "post chorus", "guitar solo", "fade out", "fade in",
+    "build", "build up", "break", "spoken word", "end", "instrumental break",
+    "chant", "choir")
 _SECTION_NAME = re.compile(
     r"^(?:" + "|".join(re.escape(n) for n in SECTION_NAMES) +
     r")(?:\s*[\d]+|\s+[ivx]+)?(?:\s*[:\-–—]\s*.{0,30}|\s*[x×]\s*\d+)?$",
@@ -50,7 +53,10 @@ _SECTION_NAME = re.compile(
 #: lyrics are written for a singer or for a generator. A `## Chorus`
 #: HEADING is a tag too, but the manuscript makes a section of it, so the
 #: refrain check reads it from the section title (`_tag_of_title`).
-_BRACKET = re.compile(r"^\s*\[([^\]]{1,40})\]\s*$")
+#: Up to 200 characters: a Suno tag carries the singer and the full timbre
+#: ("[Verse 1: Valkyrie, cold surgical Heldentenor, clipped]"), and at the
+#: old 40 every such tag was read as a sung line.
+_BRACKET = re.compile(r"^\s*\[([^\]]{1,200})\]\s*$")
 _PAREN = re.compile(r"^\s*\(([^)]{1,40})\)\s*$")
 
 _VOWELS = "aeiouy"
@@ -439,8 +445,24 @@ def _tag_name(raw: str) -> str:
     by the majority rule above, which is a structural test rather than a
     list of section names somebody has to keep up to date.
     """
-    name = re.sub(r"[\s\d]+$", "", raw.strip()).strip().lower()
-    return name
+    # The PART, not the whole tag: `Verse 1: Valkyrie, cold Heldentenor`
+    # and `Verse 2: Valkyrie` are both "verse". Written for Suno, a tag
+    # carries the singer and the timbre after the part's name, and keeping
+    # all of it made every verse its own section — nothing was ever
+    # compared. A bare hyphen is part of a name ("Pre-Chorus"); a spaced
+    # one separates ("Chorus - Kael").
+    head = re.split(r"\s*[:,(|–—]\s*|\s+-\s+", raw.strip(), maxsplit=1)[0]
+    name = head.strip().lower()
+    # Repeat marks and numbering are not the part's name either: "Chorus
+    # x2", "Chorus ×2", "Chorus 2x", "Verse II" are a chorus and a verse.
+    # Read as names, "chorus x" looked like a misspelt [Chorus] and "verse
+    # ii" was never compared with the other verses.
+    name = re.sub(r"\s*(?:[x×]\s*\d+|\d+\s*[x×])$", "", name)
+    name = re.sub(r"[\s\d]+$", "", name)
+    roman = re.match(r"^(.*\S)\s+([ivx]{1,5})$", name)
+    if roman and re.fullmatch(r"x{0,3}(ix|iv|v?i{0,3})", roman.group(2)):
+        name = roman.group(1)
+    return name.strip()
 
 
 def _untagged_refrains(ctx: Ctx) -> CraftReport:
@@ -477,6 +499,112 @@ def _untagged_refrains(ctx: Ctx) -> CraftReport:
 # ---------------------------------------------------------------------------
 # 3. the rhyme scheme, and where it breaks
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 2b. the same line, sung again to the same tune
+# ---------------------------------------------------------------------------
+
+
+@check("lyric_alignment", "Syllables line by line across repeats", LYRICS,
+       languages=ANY_LANGUAGE)
+def lyric_alignment(ctx: Ctx) -> CraftReport:
+    """Verse 1 line 3 against verse 2 line 3 — the comparison a fixed tune
+    actually makes.
+
+    `lyric_lines` compares a line with the median of its OWN section, which
+    finds the line that does not fit the verse it is in. A verse sung to the
+    same melody as the verse before has a stricter test: each line has a
+    slot, and the slot has a syllable count. Here every part of the song
+    that recurs under one tag is laid side by side and each line is compared
+    with the same line in the other occurrences.
+
+    With two occurrences there is no majority, so the difference is a NOTE
+    naming both counts. With three or more, a line far from the others'
+    median is a WARN. `align_tolerance` (default 2) is how many syllables a
+    singer can absorb without the phrase changing shape.
+    """
+    rep = CraftReport()
+    tolerance = float(ctx.opt("align_tolerance", 2))
+    # PER SONG. A two-song file compared song one's verses with song two's
+    # and warned against a median the other song set (2026-10-28). A song
+    # is a top-level section with everything under it.
+    doc = ctx.doc
+    song_of: dict[str, object] = {}
+    for top in doc.chapters():
+        for part in doc.subtree(top):
+            song_of.setdefault(part.id, top)
+    tagged: defaultdict[tuple, list] = defaultdict(list)
+    for sec in doc.sections:
+        song = song_of.get(sec.id, sec)
+        for tag, group in _tagged_stanzas(ctx, sec):
+            if tag:
+                tagged[(song.id, tag)].append((sec, group))
+    titles = {getattr(top, "id", ""): getattr(top, "title", "")
+              for top in doc.chapters()}
+    many = len(titles) > 1
+    compared = 0
+    for (song_id, tag), blocks in tagged.items():
+        where = f"{titles.get(song_id, '')} · " if many else ""
+        if len(blocks) < 2:
+            continue
+        sizes = Counter(len(g) for _s, g in blocks)
+        size = sizes.most_common(1)[0][0]
+        alike = [(n, sec, g) for n, (sec, g) in enumerate(blocks, 1)
+                 if len(g) == size]
+        if len(alike) < 2:
+            continue
+        for i in range(size):
+            counts = [(n, sec, g[i], syllables_in(g[i][2]))
+                      for n, sec, g in alike]
+            values = sorted(c for *_rest, c in counts)
+            compared += 1
+            if len(counts) == 2:
+                (n1, _s1, l1, c1), (n2, sec2, l2, c2) = counts
+                if abs(c1 - c2) <= tolerance or not (c1 and c2):
+                    continue
+                rep.findings.append(Finding(
+                    "lyric_alignment", NOTE,
+                    f"{where}“{tag}” line {i + 1}: {c2} syllables in "
+                    f"occurrence "
+                    f"{n2}, {c1} in occurrence {n1}",
+                    "The same slot of the same tune, sung with a different "
+                    "number of syllables. Two occurrences cannot say which "
+                    "one is right — only that the singer will have to "
+                    "stretch or cram one of them.",
+                    span=Span(sec2.path, l2[0], l2[1]), section_id=sec2.id,
+                    evidence=[f"{n1}: {l1[2]}", f"{n2}: {l2[2]}"],
+                    data={"tag": tag, "line": i + 1,
+                          "id": f"{where}{tag} {n2}.{i + 1}",
+                          "syllables": [c1, c2]}))
+                continue
+            median = values[len(values) // 2]
+            for n, sec, line, count in counts:
+                if not count or abs(count - median) <= tolerance:
+                    continue
+                rep.findings.append(Finding(
+                    "lyric_alignment", WARN,
+                    f"{where}“{tag}” line {i + 1}: {count} syllables in "
+                    f"occurrence "
+                    f"{n}, against a median of {median}",
+                    "Every other time this part of the song is sung, this "
+                    "line fits the same melodic slot. This one will not "
+                    "without the phrase changing shape.",
+                    span=Span(sec.path, line[0], line[1]),
+                    section_id=sec.id,
+                    evidence=[line[2]] + [f"{m}: {g[i][2]}"
+                                          for m, _x, g in alike
+                                          if m != n][:2],
+                    data={"tag": tag, "line": i + 1,
+                          "id": f"{where}{tag} {n}.{i + 1}",
+                          "syllables": count, "median": median}))
+    rep.metrics["lyric_alignment_lines"] = compared
+    if not compared:
+        rep.quiet["lyric_alignment"] = (
+            "no part of the song recurs under the same tag with the same "
+            "number of lines — tag the sections ([Verse], [Chorus]) and "
+            "this compares them line by line")
+    return rep
 
 
 @check("rhyme", "Rhyme scheme, and where it changes", LYRICS,

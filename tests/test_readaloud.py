@@ -87,6 +87,26 @@ class Jobs(unittest.TestCase):
         self.assertGreater(jobs[0].chars, 0)
         self.assertIsInstance(missing, list)
 
+    def test_a_chapter_is_read_with_its_sub_sections(self):
+        """A section's body stops at the next heading of any level, so a
+        chapter with `## scene` headings was read as its first paragraph
+        (found 2026-10-28)."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "01.md").write_text(
+                "# One\n\nThe harbour was quiet.\n\n## The quay\n\n"
+                "\"Go,\" Tobin said.\n\n## Night\n\nRain fell.\n",
+                encoding="utf-8")
+            doc = Manuscript.load(tmp)
+            jobs, missing = RA.chapter_jobs(doc, tmp, cast=["Tobin"],
+                                            narrator="n")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual([line.text for line in jobs[0].lines],
+                         ["The harbour was quiet.", "\"Go,\" Tobin said.",
+                          "Rain fell."])
+        self.assertEqual(missing, ["Tobin"])
+
     def test_no_speech_engine_is_a_state_not_an_error(self):
         line = RA.Line("Say this.", None)
         self.assertEqual(RA.speak(Host(), line), "")

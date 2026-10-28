@@ -412,7 +412,15 @@ def by_speaker(doc, cast: list[str] | None = None,
     for sec in doc.sections:
         for line in readaloud.passages(doc, sec, cast=who):
             if line.speaker:
-                lines.setdefault(line.speaker, []).append(line.text)
+                # THE DIALOGUE, not the passage around it. A passage is up
+                # to 900 characters of narration with one line of speech in
+                # it, and fitting on that measured the narrator's voice
+                # under every character's name — so everybody "sounded the
+                # same" because they were all the narrator.
+                said = [m.group(1) for m in
+                        readaloud._QUOTED.finditer(line.text)]
+                if said:
+                    lines.setdefault(line.speaker, []).extend(said)
     out = {}
     for name, said in lines.items():
         text = " ".join(said)
@@ -420,6 +428,65 @@ def by_speaker(doc, cast: list[str] | None = None,
             continue
         out[name] = fit([text], fitted_on=f"{name}: {len(said)} lines")
     return out
+
+
+def speaker_report(doc, cast: list[str] | None = None,
+                   minimum_words: int = 200) -> dict:
+    """"Does everybody in this book sound the same?" — answered.
+
+    Each speaker's dialogue is scored against every OTHER speaker's
+    fingerprint. A character whose lines sit close to someone else's
+    baseline is one a reader cannot tell apart by voice alone. Returns
+    {speakers: [{name, words, nearest, distance}], alike: [(a, b,
+    distance)], thin: [names left out], verdict}.
+
+    `distance` is the same RMS drift the Room shows: under ~1.0 two voices
+    are statistically indistinguishable on these measures; over ~2.0 they
+    are clearly different. It measures rhythm and diction, not content —
+    two characters who say different things in the same shape score close.
+    """
+    from . import cast as _cast
+    from . import readaloud
+    who = list(cast or []) or _cast.detect(doc)
+    prints = by_speaker(doc, who, minimum_words=minimum_words)
+    said: dict[str, list[str]] = {}
+    for sec in doc.sections:
+        for line in readaloud.passages(doc, sec, cast=who):
+            if line.speaker in prints:
+                said.setdefault(line.speaker, []).extend(
+                    m.group(1) for m in readaloud._QUOTED.finditer(line.text))
+    rows, alike = [], []
+    for name, fp in prints.items():
+        text = " ".join(said.get(name, []))
+        best, best_d = "", None
+        for other, ofp in prints.items():
+            if other == name:
+                continue
+            d = drift_score(score(ofp, text))
+            if best_d is None or d < best_d:
+                best, best_d = other, d
+        # None, not 0.0, when there is nobody to compare with: a host
+        # showed the lone speaker as "nearest voice at 0.0" — an alarm.
+        rows.append({"name": name, "words": fp.n_words, "nearest": best,
+                     "distance": best_d})
+        if best_d is not None and best_d < 1.0:
+            pair = tuple(sorted((name, best)))
+            if pair not in [(a, b) for a, b, _d in alike]:
+                alike.append((pair[0], pair[1], best_d))
+    spoken = {n for n in who if n in said or n in prints}
+    thin = sorted(n for n in spoken if n not in prints)
+    if len(prints) < 2:
+        verdict = ("Fewer than two characters have enough dialogue "
+                   f"({minimum_words}+ words) to compare.")
+    elif alike:
+        verdict = "These sound alike: " + "; ".join(
+            f"{a} and {b} ({d:.1f})" for a, b, d in alike)
+    else:
+        verdict = (f"{len(prints)} speaking voices, and each is "
+                   f"distinguishable from the nearest other one.")
+    return {"speakers": sorted(rows, key=lambda r: (r["distance"] is None,
+                                                    r["distance"] or 0.0)),
+            "alike": alike, "thin": thin, "verdict": verdict}
 
 
 def save(fp: Fingerprint, path: str | Path) -> Path:
